@@ -391,10 +391,6 @@ STATIC void GC_clear_a_few_frames(void)
     BZERO((word *)frames, CLEAR_NWORDS * sizeof(word));
 }
 
-/* Heap size at which we need a collection to avoid expanding past      */
-/* limits used by blacklisting.                                         */
-STATIC word GC_collect_at_heapsize = GC_WORD_MAX;
-
 GC_API void GC_CALL GC_start_incremental_collection(void)
 {
 # ifndef GC_DISABLE_INCREMENTAL
@@ -429,8 +425,10 @@ GC_INNER GC_bool GC_should_collect(void)
 # endif
     if (GC_disable_automatic_collection) return FALSE;
 
-    return(GC_adj_bytes_allocd() >= last_min_bytes_allocd
-           || GC_heapsize >= GC_collect_at_heapsize);
+    if (GC_last_heap_growth_gc_no == GC_gc_no)
+      return TRUE; /* avoid expanding past limits used by blacklisting  */
+
+    return GC_adj_bytes_allocd() >= last_min_bytes_allocd;
 }
 
 /* STATIC */ GC_start_callback_proc GC_start_call_back = 0;
@@ -791,6 +789,11 @@ GC_API int GC_CALL GC_collect_a_little(void)
 #endif /* !NO_CLOCK */
 
 #ifdef USE_MUNMAP
+# ifndef MUNMAP_THRESHOLD
+#   define MUNMAP_THRESHOLD 7
+# endif
+  GC_INNER unsigned GC_unmap_threshold = MUNMAP_THRESHOLD;
+
 # define IF_USE_MUNMAP(x) x
 # define COMMA_IF_USE_MUNMAP(x) /* comma */, x
 #else
@@ -903,18 +906,6 @@ STATIC GC_bool GC_stopped_mark(GC_stop_func stop_func)
         }
 
     GC_gc_no++;
-#   ifdef USE_MUNMAP
-      GC_ASSERT(GC_heapsize >= GC_unmapped_bytes);
-#   endif
-    GC_ASSERT(GC_our_mem_bytes >= GC_heapsize);
-    GC_DBGLOG_PRINTF("GC #%lu freed %ld bytes, heap %lu KiB ("
-                     IF_USE_MUNMAP("+ %lu KiB unmapped ")
-                     "+ %lu KiB internal)\n",
-                     (unsigned long)GC_gc_no, (long)GC_bytes_found,
-                     TO_KiB_UL(GC_heapsize - GC_unmapped_bytes) /*, */
-                     COMMA_IF_USE_MUNMAP(TO_KiB_UL(GC_unmapped_bytes)),
-                     TO_KiB_UL(GC_our_mem_bytes - GC_heapsize));
-
     /* Check all debugged objects for consistency */
     if (GC_debugging_started) {
       (*GC_check_heap)();
@@ -1108,6 +1099,12 @@ GC_INLINE int GC_compute_heap_usage_percent(void)
                 (int)((used * 100) / heap_sz) : (int)(used / (heap_sz / 100));
 }
 
+#define GC_DBGLOG_PRINT_HEAP_IN_USE() \
+  GC_DBGLOG_PRINTF("In-use heap: %d%% (%lu KiB pointers + %lu KiB other)\n", \
+                   GC_compute_heap_usage_percent(), \
+                   TO_KiB_UL(GC_composite_in_use), \
+                   TO_KiB_UL(GC_atomic_in_use))
+
 /* Finish up a collection.  Assumes mark bits are consistent, lock is   */
 /* held, but the world is otherwise running.                            */
 STATIC void GC_finish_collection(void)
@@ -1203,10 +1200,24 @@ STATIC void GC_finish_collection(void)
 
     /* Reconstruct free lists to contain everything not marked */
     GC_start_reclaim(FALSE);
-    GC_DBGLOG_PRINTF("In-use heap: %d%% (%lu KiB pointers + %lu KiB other)\n",
-                     GC_compute_heap_usage_percent(),
-                     TO_KiB_UL(GC_composite_in_use),
-                     TO_KiB_UL(GC_atomic_in_use));
+
+#   ifdef USE_MUNMAP
+      if (GC_unmap_threshold > 0 /* unmapping enabled? */
+          && EXPECT(GC_gc_no != 1, TRUE)) /* do not unmap during GC init */
+        GC_unmap_old(GC_unmap_threshold);
+
+      GC_ASSERT(GC_heapsize >= GC_unmapped_bytes);
+#   endif
+    GC_ASSERT(GC_our_mem_bytes >= GC_heapsize);
+    GC_DBGLOG_PRINTF("GC #%lu freed %ld bytes, heap %lu KiB ("
+                     IF_USE_MUNMAP("+ %lu KiB unmapped ")
+                     "+ %lu KiB internal)\n",
+                     (unsigned long)GC_gc_no, (long)GC_bytes_found,
+                     TO_KiB_UL(GC_heapsize - GC_unmapped_bytes) /*, */
+                     COMMA_IF_USE_MUNMAP(TO_KiB_UL(GC_unmapped_bytes)),
+                     TO_KiB_UL(GC_our_mem_bytes - GC_heapsize
+                               + sizeof(GC_arrays)));
+    GC_DBGLOG_PRINT_HEAP_IN_USE();
     if (GC_is_full_gc) {
         GC_used_heap_size_after_full = USED_HEAP_SIZE;
         GC_need_full_gc = FALSE;
@@ -1214,13 +1225,6 @@ STATIC void GC_finish_collection(void)
         GC_need_full_gc = USED_HEAP_SIZE - GC_used_heap_size_after_full
                             > min_bytes_allocd();
     }
-
-    GC_VERBOSE_LOG_PRINTF("Immediately reclaimed %ld bytes, heapsize:"
-                          " %lu bytes" IF_USE_MUNMAP(" (%lu unmapped)") "\n",
-                          (long)GC_bytes_found,
-                          (unsigned long)GC_heapsize /*, */
-                          COMMA_IF_USE_MUNMAP((unsigned long)
-                                              GC_unmapped_bytes));
 
     /* Reset or increment counters for next cycle */
     GC_n_attempts = 0;
@@ -1231,8 +1235,6 @@ STATIC void GC_finish_collection(void)
     GC_bytes_dropped = 0;
     GC_bytes_freed = 0;
     GC_finalizer_bytes_freed = 0;
-
-    IF_USE_MUNMAP(GC_unmap_old());
 
     if (GC_on_collection_event)
       GC_on_collection_event(GC_EVENT_RECLAIM_END);
@@ -1307,7 +1309,8 @@ GC_API void GC_CALL GC_gcollect(void)
     /* 0 is passed as stop_func to get GC_default_stop_func value       */
     /* while holding the allocation lock (to prevent data races).       */
     (void)GC_try_to_collect_general(0, FALSE);
-    if (GC_have_errors) GC_print_all_errors();
+    if (get_have_errors())
+      GC_print_all_errors();
 }
 
 STATIC word GC_heapsize_at_forced_unmap = 0;
@@ -1336,7 +1339,7 @@ GC_API void GC_CALL GC_gcollect_and_unmap(void)
 #endif
 
 /* Use the chunk of memory starting at p of size bytes as part of the heap. */
-/* Assumes p is HBLKSIZE aligned, and bytes is a multiple of HBLKSIZE.      */
+/* Assumes p is HBLKSIZE aligned, bytes argument is a multiple of HBLKSIZE. */
 STATIC void GC_add_to_heap(struct hblk *p, size_t bytes)
 {
     hdr * phdr;
@@ -1347,6 +1350,7 @@ STATIC void GC_add_to_heap(struct hblk *p, size_t bytes)
       unsigned i;
 #   endif
 
+    GC_ASSERT(I_HOLD_LOCK());
     GC_ASSERT((word)p % HBLKSIZE == 0);
     GC_ASSERT(bytes % HBLKSIZE == 0);
     GC_ASSERT(bytes > 0);
@@ -1423,15 +1427,6 @@ STATIC void GC_add_to_heap(struct hblk *p, size_t bytes)
     GC_freehblk(p);
     GC_heapsize += bytes;
 
-    /* Normally the caller calculates a new GC_collect_at_heapsize,
-     * but this is also called directly from GC_scratch_recycle_inner, so
-     * adjust here. It will be recalculated when called from
-     * GC_expand_hp_inner.
-     */
-    GC_collect_at_heapsize += bytes;
-    if (GC_collect_at_heapsize < GC_heapsize /* wrapped */)
-       GC_collect_at_heapsize = GC_WORD_MAX;
-
     if ((word)p <= (word)GC_least_plausible_heap_addr
         || GC_least_plausible_heap_addr == 0) {
         GC_least_plausible_heap_addr = (void *)((ptr_t)p - sizeof(word));
@@ -1485,16 +1480,6 @@ STATIC void GC_add_to_heap(struct hblk *p, size_t bytes)
 void * GC_least_plausible_heap_addr = (void *)GC_WORD_MAX;
 void * GC_greatest_plausible_heap_addr = 0;
 
-GC_INLINE word GC_max(word x, word y)
-{
-    return(x > y? x : y);
-}
-
-GC_INLINE word GC_min(word x, word y)
-{
-    return(x < y? x : y);
-}
-
 STATIC word GC_max_heapsize = 0;
 
 GC_API void GC_CALL GC_set_max_heap_size(GC_word n)
@@ -1510,6 +1495,7 @@ GC_INNER void GC_scratch_recycle_inner(void *ptr, size_t bytes)
   size_t displ = 0;
   size_t recycled_bytes;
 
+  GC_ASSERT(I_HOLD_LOCK());
   if (NULL == ptr) return;
 
   GC_ASSERT(bytes != 0);
@@ -1527,7 +1513,7 @@ GC_INNER void GC_scratch_recycle_inner(void *ptr, size_t bytes)
 
 /* This explicitly increases the size of the heap.  It is used          */
 /* internally, but may also be invoked from GC_expand_hp by the user.   */
-/* The argument is in units of HBLKSIZE (tiny values are rounded up).   */
+/* The argument is in units of HBLKSIZE (zero is treated as 1).         */
 /* Returns FALSE on failure.                                            */
 GC_INNER GC_bool GC_expand_hp_inner(word n)
 {
@@ -1538,8 +1524,9 @@ GC_INNER GC_bool GC_expand_hp_inner(word n)
 
     GC_ASSERT(I_HOLD_LOCK());
     GC_ASSERT(GC_page_size != 0);
-    if (n < MINHINCR) n = MINHINCR;
+    if (0 == n) n = 1;
     bytes = ROUNDUP_PAGESIZE((size_t)n * HBLKSIZE);
+    GC_DBGLOG_PRINT_HEAP_IN_USE();
     if (GC_max_heapsize != 0
         && (GC_max_heapsize < (word)bytes
             || GC_heapsize > GC_max_heapsize - (word)bytes)) {
@@ -1553,6 +1540,7 @@ GC_INNER GC_bool GC_expand_hp_inner(word n)
         return(FALSE);
     }
     GC_add_to_our_memory((ptr_t)space, bytes);
+    GC_last_heap_growth_gc_no = GC_gc_no;
     GC_INFOLOG_PRINTF("Grow heap to %lu KiB after %lu bytes allocated\n",
                       TO_KiB_UL(GC_heapsize + (word)bytes),
                       (unsigned long)GC_bytes_allocd);
@@ -1566,29 +1554,19 @@ GC_INNER GC_bool GC_expand_hp_inner(word n)
             && (word)GC_last_heap_addr < (word)space)) {
         /* Assume the heap is growing up. */
         word new_limit = (word)space + (word)bytes + expansion_slop;
-        if (new_limit > (word)space) {
-          GC_greatest_plausible_heap_addr =
-            (void *)GC_max((word)GC_greatest_plausible_heap_addr,
-                           (word)new_limit);
-        }
+        if (new_limit > (word)space
+            && (word)GC_greatest_plausible_heap_addr < new_limit)
+          GC_greatest_plausible_heap_addr = (void *)new_limit;
     } else {
         /* Heap is growing down. */
         word new_limit = (word)space - expansion_slop;
-        if (new_limit < (word)space) {
-          GC_least_plausible_heap_addr =
-            (void *)GC_min((word)GC_least_plausible_heap_addr,
-                           (word)space - expansion_slop);
-        }
+        if (new_limit < (word)space
+            && (word)GC_least_plausible_heap_addr > new_limit)
+          GC_least_plausible_heap_addr = (void *)new_limit;
     }
     GC_last_heap_addr = (ptr_t)space;
 
     GC_add_to_heap(space, bytes);
-
-    /* Force GC before we are likely to allocate past expansion_slop.   */
-    GC_collect_at_heapsize =
-        GC_heapsize + expansion_slop - 2 * MAXHINCR * HBLKSIZE;
-    if (GC_collect_at_heapsize < GC_heapsize /* wrapped */)
-        GC_collect_at_heapsize = GC_WORD_MAX;
     if (GC_on_heap_resize)
         (*GC_on_heap_resize)(GC_heapsize);
 
@@ -1596,18 +1574,28 @@ GC_INNER GC_bool GC_expand_hp_inner(word n)
 }
 
 /* Really returns a bool, but it's externally visible, so that's clumsy. */
-/* Arguments is in bytes.  Includes GC_init() call.                      */
+/* The argument is in bytes.  Includes GC_init() call.                   */
 GC_API int GC_CALL GC_expand_hp(size_t bytes)
 {
-    int result;
+    word n_blocks = OBJ_SZ_TO_BLOCKS_CHECKED(bytes);
+    word old_heapsize;
+    GC_bool result;
     DCL_LOCK_STATE;
 
     if (!EXPECT(GC_is_initialized, TRUE)) GC_init();
     LOCK();
-    result = (int)GC_expand_hp_inner(divHBLKSZ((word)bytes));
-    if (result) GC_requested_heapsize += bytes;
+    old_heapsize = GC_heapsize;
+    result = GC_expand_hp_inner(n_blocks);
+    if (result) {
+      GC_requested_heapsize += bytes;
+      if (GC_dont_gc) {
+        /* Do not call WARN if the heap growth is intentional.  */
+        GC_ASSERT(GC_heapsize >= old_heapsize);
+        GC_heapsize_on_gc_disable += GC_heapsize - old_heapsize;
+      }
+    }
     UNLOCK();
-    return(result);
+    return (int)result;
 }
 
 GC_INNER unsigned GC_fail_count = 0;
@@ -1696,8 +1684,24 @@ GC_INNER GC_bool GC_collect_or_expand(word needed_blocks,
       }
       if (blocks_to_get > divHBLKSZ(GC_WORD_MAX))
         blocks_to_get = divHBLKSZ(GC_WORD_MAX);
+    } else if (blocks_to_get < MINHINCR) {
+      blocks_to_get = MINHINCR;
     }
 
+    if (GC_max_heapsize > GC_heapsize) {
+      word max_get_blocks = divHBLKSZ(GC_max_heapsize - GC_heapsize);
+      if (blocks_to_get > max_get_blocks)
+        blocks_to_get = max_get_blocks > needed_blocks
+                        ? max_get_blocks : needed_blocks;
+    }
+
+#   ifdef USE_MUNMAP
+      if (GC_unmap_threshold > 1) {
+        /* Return as much memory to the OS as possible before   */
+        /* trying to get memory from it.                        */
+        GC_unmap_old(0);
+      }
+#   endif
     if (!GC_expand_hp_inner(blocks_to_get)
         && (blocks_to_get == needed_blocks
             || !GC_expand_hp_inner(needed_blocks))) {

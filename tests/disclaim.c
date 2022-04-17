@@ -28,21 +28,17 @@
 #undef GC_NO_THREAD_REDIRECTS
 #include "gc/gc_disclaim.h"
 
-#ifdef LINT2
-  /* Avoid include gc_priv.h. */
-# ifndef GC_API_PRIV
-#   define GC_API_PRIV GC_API
-# endif
-# ifdef __cplusplus
-    extern "C" {
-# endif
-  GC_API_PRIV long GC_random(void);
-# ifdef __cplusplus
-    } /* extern "C" */
-# endif
+#if defined(GC_PTHREADS) || defined(LINT2)
+# define NOT_GCBUILD
+# include "private/gc_priv.h"
+  /* Redefine the standard rand() with a trivial (yet sufficient for    */
+  /* the test purpose) implementation to avoid crashes inside rand()    */
+  /* on some targets (e.g. FreeBSD 13.0) when used concurrently.        */
+  /* The standard specifies rand() as not a thread-safe API function.   */
 # undef rand
-# define rand() (int)GC_random()
-#endif /* LINT2 */
+  static GC_RAND_STATE_T seed; /* concurrent update does not hurt the test */
+# define rand() GC_RAND_NEXT(&seed)
+#endif /* GC_PTHREADS || LINT2 */
 
 #define my_assert(e) \
     if (!(e)) { \
@@ -182,21 +178,17 @@ pair_check_rec(pair_t p)
 
 #ifdef GC_PTHREADS
 # ifndef NTHREADS
-#   define NTHREADS 6
+#   define NTHREADS 5 /* Excludes main thread, which also runs a test. */
 # endif
 # include <errno.h> /* for EAGAIN */
 # include <pthread.h>
 #else
 # undef NTHREADS
-# define NTHREADS 1
+# define NTHREADS 0
 #endif
 
 #define POP_SIZE 1000
-#if NTHREADS > 1
-# define MUTATE_CNT (2000000/NTHREADS)
-#else
-# define MUTATE_CNT 10000000
-#endif
+#define MUTATE_CNT (6*1000000/(NTHREADS+1))
 #define GROW_LIMIT (MUTATE_CNT/10)
 
 void *test(void *data)
@@ -206,6 +198,8 @@ void *test(void *data)
     memset(pop, 0, sizeof(pop));
     for (i = 0; i < MUTATE_CNT; ++i) {
         int t = rand() % POP_SIZE;
+        int j;
+
         switch (rand() % (i > GROW_LIMIT? 5 : 3)) {
         case 0: case 3:
             if (pop[t])
@@ -216,8 +210,8 @@ void *test(void *data)
                 pop[t] = pop[t]->cdr;
             break;
         case 2:
-            pop[t] = pair_new(pop[rand() % POP_SIZE],
-                              pop[rand() % POP_SIZE]);
+            j = rand() % POP_SIZE;
+            pop[t] = pair_new(pop[j], pop[rand() % POP_SIZE]);
             break;
         }
         if (rand() % 8 == 1)
@@ -228,10 +222,15 @@ void *test(void *data)
 
 int main(void)
 {
-# if NTHREADS > 1
+# if NTHREADS > 0
     pthread_t th[NTHREADS];
     int i, n;
 # endif
+
+    /* Test the same signal usage for threads suspend and restart on Linux. */
+#   ifdef GC_PTHREADS
+        GC_set_thr_restart_signal(GC_get_suspend_signal());
+#   endif
 
     GC_set_all_interior_pointers(0); /* for a stricter test */
 #   ifdef TEST_MANUAL_VDB
@@ -247,7 +246,7 @@ int main(void)
 
     test_misc_sizes();
 
-# if NTHREADS > 1
+# if NTHREADS > 0
     printf("Threaded disclaim test.\n");
     for (i = 0; i < NTHREADS; ++i) {
         int err = pthread_create(&th[i], NULL, test, NULL);
@@ -259,6 +258,9 @@ int main(void)
         }
     }
     n = i;
+# endif
+  test(NULL);
+# if NTHREADS > 0
     for (i = 0; i < n; ++i) {
         int err = pthread_join(th[i], NULL);
         if (err) {
@@ -267,9 +269,7 @@ int main(void)
             exit(69);
         }
     }
-# else
-    printf("Unthreaded disclaim test.\n");
-    test(NULL);
 # endif
+    printf("SUCCEEDED\n");
     return 0;
 }

@@ -11,17 +11,9 @@
  * modified is included with the above copyright notice.
  */
 
-/****************************************************************************
-usage: test_cpp number-of-iterations
-
-This program tries to test the specific C++ functionality provided by
-gc_cpp.h that isn't tested by the more general test routines of the
-collector.
-
-A recommended value for number-of-iterations is 10, which will take a
-few minutes to complete.
-
-***************************************************************************/
+// This program tries to test the specific C++ functionality provided by
+// gc_cpp.h that isn't tested by the more general test routines of the
+// collector.
 
 #ifdef HAVE_CONFIG_H
 # include "config.h"
@@ -70,14 +62,21 @@ extern "C" {
                     __LINE__ ); \
         exit( 1 ); }
 
+#if defined(__powerpc64__) && !defined(__clang__) && GC_GNUC_PREREQ(10, 0)
+  /* Suppress "layout of aggregates ... has changed" GCC note. */
+# define A_I_TYPE short
+#else
+# define A_I_TYPE int
+#endif
+
 class A {public:
     /* An uncollectible class. */
 
-    GC_ATTR_EXPLICIT A( int iArg ): i( iArg ) {}
+    GC_ATTR_EXPLICIT A( int iArg ): i((A_I_TYPE)iArg) {}
     void Test( int iArg ) {
         my_assert( i == iArg );}
     virtual ~A() {}
-    int i;};
+    A_I_TYPE i; };
 
 
 class B: public GC_NS_QUALIFY(gc), public A { public:
@@ -241,6 +240,8 @@ void* Undisguise( GC_word i ) {
       my_assert(freed_before != freed_after); \
     }
 
+#define N_TESTS 7
+
 #if ((defined(MSWIN32) && !defined(__MINGW32__)) || defined(MSWINCE)) \
     && !defined(NO_WINMAIN_ENTRY)
   int APIENTRY WinMain( HINSTANCE /* instance */, HINSTANCE /* prev */,
@@ -283,7 +284,7 @@ void* Undisguise( GC_word i ) {
       }
 #elif defined(MACOS)
   int main() {
-    char* argv_[] = {"test_cpp", "10"}; // MacOS doesn't have a command line
+    char* argv_[] = {"cpptest", "7"}; // MacOS doesn't have a command line
     argv = argv_;
     argc = sizeof(argv_)/sizeof(argv_[0]);
 #else
@@ -317,11 +318,14 @@ void* Undisguise( GC_word i ) {
     GC_PTR_STORE_AND_DIRTY(xptr, x);
     x = 0;
     if (argc != 2
-        || (n = (int)COVERT_DATAFLOW(atoi(argv[1]))) <= 0) {
-      GC_printf("usage: test_cpp number-of-iterations\n"
-                "Assuming 10 iters\n");
-      n = 10;
+        || (n = atoi(argv[1])) <= 0) {
+      GC_printf("usage: cpptest <number-of-iterations>\n"
+                "Assuming %d iterations\n", N_TESTS);
+      n = N_TESTS;
     }
+#   ifdef LINT2
+      if (n > 100 * 1000) n = 100 * 1000;
+#   endif
 
     for (iters = 1; iters <= n; iters++) {
         GC_printf( "Starting iteration %d\n", iters );

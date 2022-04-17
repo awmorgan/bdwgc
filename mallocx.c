@@ -79,6 +79,12 @@ GC_API void * GC_CALL GC_realloc(void * p, size_t lb)
     struct hblk * h;
     hdr * hhdr;
     void * result;
+#   if defined(_FORTIFY_SOURCE) && defined(__GNUC__) && !defined(__clang__)
+      volatile  /* Use cleared_p instead of p as a workaround to avoid  */
+                /* passing alloc_size(lb) attribute associated with p   */
+                /* to memset (including memset call inside GC_free).    */
+#   endif
+      word cleared_p = (word)p;
     size_t sz;      /* Current size in bytes    */
     size_t orig_sz; /* Original sz in bytes     */
     int obj_kind;
@@ -146,7 +152,7 @@ GC_API void * GC_CALL GC_realloc(void * p, size_t lb)
             if (orig_sz > lb) {
               /* Clear unneeded part of object to avoid bogus pointer */
               /* tracing.                                             */
-                BZERO(((ptr_t)p) + lb, orig_sz - lb);
+                BZERO((ptr_t)cleared_p + lb, orig_sz - lb);
             }
             return(p);
         }
@@ -159,7 +165,7 @@ GC_API void * GC_CALL GC_realloc(void * p, size_t lb)
       /* But this gives the client warning of imminent disaster.        */
       BCOPY(p, result, sz);
 #     ifndef IGNORE_FREE
-        GC_free(p);
+        GC_free((ptr_t)cleared_p);
 #     endif
     }
     return result;
@@ -205,7 +211,7 @@ GC_API GC_ATTR_MALLOC void * GC_CALL
     lb_rounded = GRANULES_TO_BYTES(lg);
     n_blocks = OBJ_SZ_TO_BLOCKS(lb_rounded);
     init = GC_obj_kinds[k].ok_init;
-    if (EXPECT(GC_have_errors, FALSE))
+    if (EXPECT(get_have_errors(), FALSE))
       GC_print_all_errors();
     GC_INVOKE_FINALIZERS();
     GC_DBG_COLLECT_AT_MALLOC(lb);
@@ -325,7 +331,7 @@ GC_API void GC_CALL GC_generic_malloc_many(size_t lb, int k, void **result)
     GC_ASSERT(k < MAXOBJKINDS);
     lw = BYTES_TO_WORDS(lb);
     lg = BYTES_TO_GRANULES(lb);
-    if (EXPECT(GC_have_errors, FALSE))
+    if (EXPECT(get_have_errors(), FALSE))
       GC_print_all_errors();
     GC_INVOKE_FINALIZERS();
     GC_DBG_COLLECT_AT_MALLOC(lb);

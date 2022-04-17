@@ -170,9 +170,11 @@ typedef int GC_bool;
 #if defined(CPPCHECK)
 # define MACRO_BLKSTMT_BEGIN {
 # define MACRO_BLKSTMT_END   }
+# define LOCAL_VAR_INIT_OK =0 /* to avoid "uninit var" false positive */
 #else
 # define MACRO_BLKSTMT_BEGIN do {
 # define MACRO_BLKSTMT_END   } while (0)
+# define LOCAL_VAR_INIT_OK /* empty */
 #endif
 
 #if defined(M68K) && defined(__GNUC__)
@@ -213,7 +215,10 @@ typedef int GC_bool;
 # elif GC_CLANG_PREREQ(3, 8)
 #   define GC_ATTR_NO_SANITIZE_THREAD __attribute__((no_sanitize("thread")))
 # else
-#   define GC_ATTR_NO_SANITIZE_THREAD __attribute__((no_sanitize_thread))
+    /* It seems that no_sanitize_thread attribute has no effect if the  */
+    /* function is inlined (as of gcc 11.1.0, at least).                */
+#   define GC_ATTR_NO_SANITIZE_THREAD \
+                GC_ATTR_NOINLINE __attribute__((no_sanitize_thread))
 # endif
 #endif /* !GC_ATTR_NO_SANITIZE_THREAD */
 
@@ -1186,10 +1191,10 @@ struct hblkhdr {
         char _hb_marks[MARK_BITS_SZ];
                             /* The i'th byte is 1 if the object         */
                             /* starting at granule i or object i is     */
-                            /* marked, 0 o.w.                           */
-                            /* The mark bit for the "one past the       */
-                            /* end" object is always set to avoid a     */
-                            /* special case test in the marker.         */
+                            /* marked, 0 otherwise.                     */
+                            /* The mark bit for the "one past the end"  */
+                            /* object is always set to avoid a special  */
+                            /* case test in the marker.                 */
         word dummy;     /* Force word alignment of mark bytes. */
       } _mark_byte_union;
 #     define hb_marks _mark_byte_union._hb_marks
@@ -1360,6 +1365,8 @@ struct HeapSect {
 struct _GC_arrays {
   word _heapsize;       /* Heap size in bytes (value never goes down).  */
   word _requested_heapsize;     /* Heap size due to explicit expansion. */
+# define GC_heapsize_on_gc_disable GC_arrays._heapsize_on_gc_disable
+  word _heapsize_on_gc_disable;
   ptr_t _last_heap_addr;
   word _large_free_bytes;
         /* Total bytes contained in blocks on large object free */
@@ -1433,6 +1440,9 @@ struct _GC_arrays {
                           /* composite objects.                 */
   word _atomic_in_use;    /* Number of bytes in the accessible  */
                           /* atomic objects.                    */
+# define GC_last_heap_growth_gc_no GC_arrays._last_heap_growth_gc_no
+  word _last_heap_growth_gc_no;
+                /* GC number of latest successful GC_expand_hp_inner call */
 # ifdef USE_MUNMAP
 #   define GC_unmapped_bytes GC_arrays._unmapped_bytes
     word _unmapped_bytes;
@@ -1583,7 +1593,7 @@ struct _GC_arrays {
     unsigned short * _obj_map[MAXOBJGRANULES + 1];
                        /* If not NULL, then a pointer to a map of valid */
                        /* object addresses.                             */
-                       /* _obj_map[sz_in_granules][i] is                */
+                       /* GC_obj_map[sz_in_granules][i] is              */
                        /* i % sz_in_granules.                           */
                        /* This is now used purely to replace a          */
                        /* division in the marker by a table lookup.     */
@@ -1591,7 +1601,7 @@ struct _GC_arrays {
                        /* contains all nonzero entries.  This gets us   */
                        /* out of the marker fast path without an extra  */
                        /* test.                                         */
-#   define MAP_LEN BYTES_TO_GRANULES(HBLKSIZE)
+#   define OBJ_MAP_LEN  BYTES_TO_GRANULES(HBLKSIZE)
 # endif
 # define VALID_OFFSET_SZ HBLKSIZE
   char _valid_offsets[VALID_OFFSET_SZ];
@@ -1812,6 +1822,10 @@ struct GC_traced_stack_sect_s {
 #endif /* !THREADS */
 
 #ifdef IA64
+  GC_EXTERN ptr_t GC_register_stackbottom;
+#endif
+
+#if defined(E2K) || defined(IA64)
   /* Similar to GC_push_all_stack_sections() but for IA-64 registers store. */
   GC_INNER void GC_push_all_register_sections(ptr_t bs_lo, ptr_t bs_hi,
                   int eager, struct GC_traced_stack_sect_s *traced_stack_sect);
@@ -1969,11 +1983,109 @@ GC_EXTERN void (*GC_push_typed_structures)(void);
 GC_INNER void GC_with_callee_saves_pushed(void (*fn)(ptr_t, void *),
                                           volatile ptr_t arg);
 
-#if defined(SPARC) || defined(IA64)
+#if defined(E2K) || defined(IA64) || defined(SPARC)
   /* Cause all stacked registers to be saved in memory.  Return a       */
   /* pointer to the top of the corresponding memory stack.              */
   ptr_t GC_save_regs_in_stack(void);
 #endif
+
+#ifdef E2K
+  /* Copy the full procedure stack to the provided buffer (with the     */
+  /* given capacity).  Returns either the required buffer size if it    */
+  /* is bigger than capacity, otherwise the amount of copied bytes.     */
+  /* May be called from a signal handler.                               */
+  GC_INNER size_t GC_get_procedure_stack(ptr_t, size_t);
+
+# if defined(CPPCHECK)
+#   define PS_ALLOCA_BUF(sz) NULL
+#   define ALLOCA_SAFE_LIMIT 0
+# else
+#   define PS_ALLOCA_BUF(sz) alloca(sz) /* cannot return NULL */
+#   ifndef ALLOCA_SAFE_LIMIT
+#     define ALLOCA_SAFE_LIMIT (HBLKSIZE*3)
+#   endif
+# endif /* !CPPCHECK */
+
+  /* Copy procedure (register) stack to a stack-allocated or    */
+  /* memory-mapped buffer.  Usable from a signal handler.       */
+  /* FREE_PROCEDURE_STACK_LOCAL() must be called with the same  */
+  /* *pbuf and *psz values before the caller function returns   */
+  /* (thus, the buffer is valid only within the function).      */
+# define GET_PROCEDURE_STACK_LOCAL(pbuf, psz)                   \
+        do {                                                    \
+          size_t capacity = 0;                                  \
+          GC_ASSERT(GC_page_size != 0);                         \
+          for (*(pbuf) = NULL; ; capacity = *(psz)) {           \
+            *(psz) = GC_get_procedure_stack(*(pbuf), capacity); \
+            if (*(psz) <= capacity) break;                      \
+            if (*(psz) > ALLOCA_SAFE_LIMIT                      \
+                || EXPECT(capacity != 0, FALSE)) {              \
+              /* Deallocate old buffer if any. */               \
+              if (EXPECT(capacity > ALLOCA_SAFE_LIMIT, FALSE))  \
+                GC_unmap_procedure_stack_buf(*(pbuf),capacity); \
+              *(psz) = ROUNDUP_PAGESIZE(*(psz));                \
+              *(pbuf) = GC_mmap_procedure_stack_buf(*(psz));    \
+            } else {                                            \
+              /* Allocate buffer on the stack if not large. */  \
+              *(pbuf) = PS_ALLOCA_BUF(*(psz));                  \
+            }                                                   \
+          }                                                     \
+          if (capacity > ALLOCA_SAFE_LIMIT                      \
+              && EXPECT(((capacity - *(psz))                    \
+                         & ~(GC_page_size-1)) != 0, FALSE)) {   \
+            /* Ensure sz value passed to munmap() later */      \
+            /* matches that passed to mmap() above.     */      \
+            *(psz) = capacity - (GC_page_size - 1);             \
+          }                                                     \
+        } while (0)
+
+  /* Indicate that the buffer with copied procedure stack is not needed. */
+# define FREE_PROCEDURE_STACK_LOCAL(buf, sz) \
+        (void)((sz) > ALLOCA_SAFE_LIMIT \
+                ? (GC_unmap_procedure_stack_buf(buf, sz), 0) : 0)
+
+  GC_INNER ptr_t GC_mmap_procedure_stack_buf(size_t);
+  GC_INNER void GC_unmap_procedure_stack_buf(ptr_t, size_t);
+
+# ifdef THREADS
+    /* Allocate a buffer in the GC heap (as an atomic object) and copy  */
+    /* procedure stack there.  Assumes the GC allocation lock is held.  */
+    /* May trigger a collection (thus, cannot be used in GC_push_roots  */
+    /* or in a signal handler).  The buffer should be freed with        */
+    /* GC_INTERNAL_FREE later when not needed (or, alternatively, it    */
+    /* could be just garbage-collected).                                */
+    /* Similar to GET_PROCEDURE_STACK_LOCAL in other aspects.           */
+    GC_INNER size_t GC_alloc_and_get_procedure_stack(ptr_t *pbuf);
+# endif
+#endif /* E2K */
+
+#if defined(E2K) && defined(USE_PTR_HWTAG)
+  /* Load value and get tag of the target memory.   */
+# if defined(__ptr64__)
+#   define LOAD_TAGGED_VALUE(v, tag, p)         \
+        do {                                    \
+          word val;                             \
+          __asm__ __volatile__ (                \
+            "ldd, sm %[adr], 0x0, %[val]\n\t"   \
+            "gettagd %[val], %[tag]\n"          \
+            : [val] "=r" (val),                 \
+              [tag] "=r" (tag)                  \
+            : [adr] "r" (p));                   \
+          v = val;                              \
+        } while (0)
+# elif !defined(CPPCHECK)
+#   error Unsupported -march for e2k target
+# endif
+
+# define LOAD_WORD_OR_CONTINUE(v, p) \
+        { \
+          int tag LOCAL_VAR_INIT_OK; \
+          LOAD_TAGGED_VALUE(v, tag, p); \
+          if (tag != 0) continue; \
+        }
+#else
+# define LOAD_WORD_OR_CONTINUE(v, p) (void)(v = *(word *)(p))
+#endif /* !E2K */
 
 #if defined(AMIGA) || defined(MACOS) || defined(GC_DARWIN_THREADS)
   void GC_push_one(word p);
@@ -2030,6 +2142,7 @@ ptr_t GC_get_main_stack_base(void);     /* Cold end of stack.           */
   GC_INNER ptr_t GC_get_register_stack_base(void);
                                         /* Cold end of register stack.  */
 #endif
+
 void GC_register_data_segments(void);
 
 #ifdef THREADS
@@ -2131,8 +2244,8 @@ GC_INNER struct hblk * GC_allochblk(size_t size_in_bytes, int kind,
 
 GC_INNER ptr_t GC_alloc_large(size_t lb, int k, unsigned flags);
                         /* Allocate a large block of size lb bytes.     */
-                        /* The block is not cleared.                    */
-                        /* Flags is 0 or IGNORE_OFF_PAGE.               */
+                        /* The block is not cleared.  flags argument    */
+                        /* should be 0 or IGNORE_OFF_PAGE.              */
                         /* Calls GC_allchblk to do the actual           */
                         /* allocation, but also triggers GC and/or      */
                         /* heap expansion as appropriate.               */
@@ -2297,10 +2410,20 @@ GC_EXTERN void (*GC_print_heap_obj)(ptr_t p);
   GC_INNER GC_bool GC_check_leaked(ptr_t base); /* from dbg_mlc.c */
 #endif
 
-GC_EXTERN GC_bool GC_have_errors; /* We saw a smashed or leaked object. */
-                                  /* Call error printing routine        */
-                                  /* occasionally.  It is OK to read it */
-                                  /* without acquiring the lock.        */
+#ifdef AO_HAVE_store
+  GC_EXTERN volatile AO_t GC_have_errors;
+# define GC_SET_HAVE_ERRORS() AO_store(&GC_have_errors, (AO_t)TRUE)
+# define get_have_errors() ((GC_bool)AO_load(&GC_have_errors))
+                                /* The barriers are not needed.         */
+#else
+  GC_EXTERN GC_bool GC_have_errors;
+# define GC_SET_HAVE_ERRORS() (void)(GC_have_errors = TRUE)
+# define get_have_errors() GC_have_errors
+#endif                          /* We saw a smashed or leaked object.   */
+                                /* Call error printing routine          */
+                                /* occasionally.  It is OK to read it   */
+                                /* without acquiring the lock.          */
+                                /* If set to true, it is never cleared. */
 
 #define VERBOSE 2
 #if !defined(NO_CLOCK) || !defined(SMALL_CONFIG)
@@ -2315,13 +2438,29 @@ GC_EXTERN GC_bool GC_have_errors; /* We saw a smashed or leaked object. */
 
 #ifdef KEEP_BACK_PTRS
   GC_EXTERN long GC_backtraces;
-  GC_INNER void GC_generate_random_backtrace_no_gc(void);
 #endif
 
-#ifdef LINT2
-# define GC_RAND_MAX (~0U >> 1)
-  GC_API_PRIV long GC_random(void);
-#endif
+#if defined(THREADS) || defined(LINT2)
+  /* A trivial (linear congruential) pseudo-random numbers generator,   */
+  /* safe for the concurrent usage.                                     */
+# define GC_RAND_MAX ((int)(~0U >> 1))
+# if defined(AO_HAVE_store) && defined(THREAD_SANITIZER)
+#   define GC_RAND_STATE_T volatile AO_t
+#   define GC_RAND_NEXT(pseed) GC_rand_next(pseed)
+    GC_INLINE int GC_rand_next(GC_RAND_STATE_T *pseed)
+    {
+      AO_t next = (AO_t)((AO_load(pseed) * 1103515245U + 12345)
+                         & (unsigned)GC_RAND_MAX);
+      AO_store(pseed, next);
+      return (int)next;
+    }
+# else
+#   define GC_RAND_STATE_T unsigned
+#   define GC_RAND_NEXT(pseed) /* overflow and race are OK */ \
+                (int)(*(pseed) = (*(pseed) * 1103515245U + 12345) \
+                                 & (unsigned)GC_RAND_MAX)
+# endif
+#endif /* THREADS || LINT2 */
 
 GC_EXTERN GC_bool GC_print_back_height;
 
@@ -2361,7 +2500,7 @@ GC_EXTERN GC_bool GC_print_back_height;
 
 #ifdef USE_MUNMAP
   /* Memory unmapping: */
-  GC_INNER void GC_unmap_old(void);
+  GC_INNER void GC_unmap_old(unsigned threshold);
   GC_INNER void GC_merge_unmapped(void);
   GC_INNER void GC_unmap(ptr_t start, size_t bytes);
   GC_INNER void GC_remap(ptr_t start, size_t bytes);
@@ -2567,7 +2706,7 @@ GC_EXTERN signed_word GC_bytes_found;
 #endif
 
 #ifdef USE_MUNMAP
-  GC_EXTERN int GC_unmap_threshold; /* defined in allchblk.c */
+  GC_EXTERN unsigned GC_unmap_threshold; /* defined in alloc.c */
   GC_EXTERN GC_bool GC_force_unmap_on_gcollect; /* defined in misc.c */
 #endif
 
@@ -2623,7 +2762,8 @@ GC_EXTERN signed_word GC_bytes_found;
 #if defined(MPROTECT_VDB) && defined(GWW_VDB)
     GC_INNER GC_bool GC_gww_dirty_init(void);
                         /* Returns TRUE if GetWriteWatch is available.  */
-                        /* May be called repeatedly.                    */
+                        /* May be called repeatedly.  May be called     */
+                        /* with or without the GC lock held.            */
 #endif
 
 #if defined(CHECKSUMS) || defined(PROC_VDB)
@@ -2714,11 +2854,6 @@ GC_INNER void *GC_store_debug_info_inner(void *p, word sz, const char *str,
 
 #ifdef SEARCH_FOR_DATA_START
   GC_INNER void GC_init_linux_data_start(void);
-  void * GC_find_limit(void *, int);
-#endif
-
-#if defined(NETBSD) && defined(__ELF__)
-  GC_INNER void GC_init_netbsd_elf(void);
   void * GC_find_limit(void *, int);
 #endif
 
@@ -2841,16 +2976,23 @@ GC_INNER void *GC_store_debug_info_inner(void *p, word sz, const char *str,
   GC_INNER void GC_start_mark_threads_inner(void);
 #endif /* PARALLEL_MARK */
 
-#if defined(GC_PTHREADS) && !defined(GC_WIN32_THREADS) && !defined(NACL) \
-    && !defined(GC_DARWIN_THREADS) && !defined(SIG_SUSPEND)
+#if defined(SIGNAL_BASED_STOP_WORLD) && !defined(SIG_SUSPEND)
   /* We define the thread suspension signal here, so that we can refer  */
   /* to it in the dirty bit implementation, if necessary.  Ideally we   */
   /* would allocate a (real-time?) signal using the standard mechanism. */
   /* unfortunately, there is no standard mechanism.  (There is one      */
   /* in Linux glibc, but it's not exported.)  Thus we continue to use   */
   /* the same hard-coded signals we've always used.                     */
-# if (defined(GC_LINUX_THREADS) || defined(GC_DGUX386_THREADS)) \
-     && !defined(GC_USESIGRT_SIGNALS)
+# ifdef THREAD_SANITIZER
+    /* Unfortunately, use of an asynchronous signal to suspend threads  */
+    /* leads to the situation when the signal is not delivered (is      */
+    /* stored to pending_signals in TSan runtime actually) while the    */
+    /* destination thread is blocked in pthread_mutex_lock.  Thus, we   */
+    /* use some synchronous one instead (which is again unlikely to be  */
+    /* used by clients directly).                                       */
+#   define SIG_SUSPEND SIGSYS
+# elif (defined(GC_LINUX_THREADS) || defined(GC_DGUX386_THREADS)) \
+       && !defined(GC_USESIGRT_SIGNALS)
 #   if defined(SPARC) && !defined(SIGPWR)
       /* SPARC/Linux doesn't properly define SIGPWR in <signal.h>.      */
       /* It is aliased to SIGLOST in asm/signal.h, though.              */
@@ -2859,7 +3001,14 @@ GC_INNER void *GC_store_debug_info_inner(void *p, word sz, const char *str,
       /* Linuxthreads itself uses SIGUSR1 and SIGUSR2.                  */
 #     define SIG_SUSPEND SIGPWR
 #   endif
-# elif defined(GC_OPENBSD_THREADS)
+# elif defined(GC_FREEBSD_THREADS) && defined(__GLIBC__) \
+       && !defined(GC_USESIGRT_SIGNALS)
+#   define SIG_SUSPEND (32+6)
+# elif (defined(GC_FREEBSD_THREADS) || defined(HURD) || defined(RTEMS)) \
+       && !defined(GC_USESIGRT_SIGNALS)
+#   define SIG_SUSPEND SIGUSR1
+        /* SIGTSTP and SIGCONT could be used alternatively on FreeBSD.  */
+# elif defined(GC_OPENBSD_THREADS) && !defined(GC_USESIGRT_SIGNALS)
 #   ifndef GC_OPENBSD_UTHREADS
 #     define SIG_SUSPEND SIGXFSZ
 #   endif
@@ -2900,35 +3049,13 @@ GC_INNER void *GC_store_debug_info_inner(void *p, word sz, const char *str,
 # define JMP_BUF jmp_buf
 #endif /* !UNIX_LIKE || GC_NO_SIGSETJMP */
 
-/* Do we need the GC_find_limit machinery to find the end of a  */
-/* data segment.                                                */
-#if defined(HEURISTIC2) || defined(SEARCH_FOR_DATA_START) \
-    || ((defined(SVR4) || defined(AIX) || defined(DGUX) \
-         || (defined(LINUX) && defined(SPARC))) && !defined(PCR))
-# define NEED_FIND_LIMIT
-#endif
-
 #if defined(DATASTART_USES_BSDGETDATASTART)
   EXTERN_C_END
 # include <machine/trap.h>
   EXTERN_C_BEGIN
-# if !defined(PCR)
-#   define NEED_FIND_LIMIT
-# endif
   GC_INNER ptr_t GC_FreeBSDGetDataStart(size_t, ptr_t);
 # define DATASTART_IS_FUNC
 #endif /* DATASTART_USES_BSDGETDATASTART */
-
-#if (defined(NETBSD) || defined(OPENBSD)) && defined(__ELF__) \
-    && !defined(NEED_FIND_LIMIT)
-  /* Used by GC_init_netbsd_elf() in os_dep.c. */
-# define NEED_FIND_LIMIT
-#endif
-
-#if defined(IA64) && !defined(NEED_FIND_LIMIT)
-# define NEED_FIND_LIMIT
-     /* May be needed for register backing store base. */
-#endif
 
 #if defined(NEED_FIND_LIMIT) \
      || (defined(WRAP_MARK_SOME) && !defined(MSWIN32) && !defined(MSWINCE)) \

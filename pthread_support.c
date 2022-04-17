@@ -426,6 +426,20 @@ STATIC void * GC_mark_thread(void * id)
 
 STATIC pthread_t GC_mark_threads[MAX_MARKERS];
 
+#ifdef GLIBC_2_1_MUTEX_HACK
+  /* Ugly workaround for a linux threads bug in the final versions      */
+  /* of glibc2.1.  Pthread_mutex_trylock sets the mutex owner           */
+  /* field even when it fails to acquire the mutex.  This causes        */
+  /* pthread_cond_wait to die.  Remove for glibc2.2.                    */
+  /* According to the man page, we should use                           */
+  /* PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP, but that isn't actually   */
+  /* defined.                                                           */
+  static pthread_mutex_t mark_mutex =
+        {0, 0, 0, PTHREAD_MUTEX_ERRORCHECK_NP, {0, 0}};
+#else
+  static pthread_mutex_t mark_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 #ifdef CAN_HANDLE_FORK
   static int available_markers_m1 = 0;
   static pthread_cond_t mark_cv;
@@ -490,8 +504,7 @@ GC_INNER void GC_start_mark_threads_inner(void)
       if (sigfillset(&set) != 0)
         ABORT("sigfillset failed");
 
-#     if !defined(GC_DARWIN_THREADS) && !defined(GC_OPENBSD_UTHREADS) \
-         && !defined(NACL)
+#     ifdef SIGNAL_BASED_STOP_WORLD
         /* These are used by GC to stop and restart the world.  */
         if (sigdelset(&set, GC_get_suspend_signal()) != 0
             || sigdelset(&set, GC_get_thr_restart_signal()) != 0)
@@ -540,11 +553,19 @@ GC_INNER GC_bool GC_thr_initialized = FALSE;
 
 GC_INNER volatile GC_thread GC_threads[THREAD_TABLE_SZ] = {0};
 
+/* It may not be safe to allocate when we register the first thread.    */
+/* As "next" and "status" fields are unused, no need to push this       */
+/* (but "backing_store_end" field should be pushed on E2K).             */
+static struct GC_Thread_Rep first_thread;
+
 void GC_push_thread_structures(void)
 {
     GC_ASSERT(I_HOLD_LOCK());
     GC_PUSH_ALL_SYM(GC_threads);
-#   if defined(THREAD_LOCAL_ALLOC)
+#   ifdef E2K
+      GC_PUSH_ALL_SYM(first_thread.backing_store_end);
+#   endif
+#   if defined(THREAD_LOCAL_ALLOC) && defined(USE_CUSTOM_SPECIFIC)
       GC_PUSH_ALL_SYM(GC_thread_key);
 #   endif
 }
@@ -566,10 +587,6 @@ void GC_push_thread_structures(void)
     return count;
   }
 #endif /* DEBUG_THREADS */
-
-/* It may not be safe to allocate when we register the first thread.    */
-/* As "next" and "status" fields are unused, no need to push this.      */
-static struct GC_Thread_Rep first_thread;
 
 /* Add a thread to GC_threads.  We assume it wasn't already there.      */
 /* Caller holds allocation lock.                                        */
@@ -610,7 +627,7 @@ STATIC GC_thread GC_new_thread(pthread_t id)
       GC_nacl_gc_thread_self = result;
       GC_nacl_initialize_gc_thread();
 #   endif
-    GC_ASSERT(result -> flags == 0 && result -> thread_blocked == 0);
+    GC_ASSERT(0 == result -> flags);
     if (EXPECT(result != &first_thread, TRUE))
       GC_dirty(result);
     return(result);
@@ -1073,6 +1090,20 @@ STATIC void GC_remove_all_threads_but_me(void)
   }
 #endif /* ARM32 && GC_LINUX_THREADS && !NACL */
 
+#if defined(CAN_HANDLE_FORK) && defined(THREAD_SANITIZER)
+# include "private/gc_pmark.h" /* for MS_NONE */
+
+  /* Workaround for TSan which does not notice that the GC lock */
+  /* is acquired in fork_prepare_proc().                        */
+  GC_ATTR_NO_SANITIZE_THREAD
+  static GC_bool collection_in_progress(void)
+  {
+    return GC_mark_state != MS_NONE;
+  }
+#else
+# define collection_in_progress() GC_collection_in_progress()
+#endif
+
 /* We hold the GC lock.  Wait until an in-progress GC has finished.     */
 /* Repeatedly RELEASES GC LOCK in order to wait.                        */
 /* If wait_for_all is true, then we exit with the GC lock held and no   */
@@ -1087,12 +1118,12 @@ STATIC void GC_wait_for_gc_completion(GC_bool wait_for_all)
       GC_ASSERT(I_HOLD_LOCK());
 #   endif
     ASSERT_CANCEL_DISABLED();
-    if (GC_incremental && GC_collection_in_progress()) {
+    if (GC_incremental && collection_in_progress()) {
         word old_gc_no = GC_gc_no;
 
         /* Make sure that no part of our stack is still on the mark stack, */
         /* since it's about to be unmapped.                                */
-        while (GC_incremental && GC_collection_in_progress()
+        while (GC_incremental && collection_in_progress()
                && (wait_for_all || old_gc_no == GC_gc_no)) {
             ENTER_GC();
             GC_in_thread_creation = TRUE;
@@ -1118,6 +1149,18 @@ STATIC void GC_wait_for_gc_completion(GC_bool wait_for_all)
 IF_CANCEL(static int fork_cancel_state;)
                                 /* protected by allocation lock.        */
 
+# ifdef PARALLEL_MARK
+#   ifdef THREAD_SANITIZER
+#     if defined(GC_ASSERTIONS) && defined(CAN_CALL_ATFORK)
+        STATIC void GC_generic_lock(pthread_mutex_t *);
+#     endif
+      GC_ATTR_NO_SANITIZE_THREAD
+      static void wait_for_reclaim_atfork(void);
+#   else
+#     define wait_for_reclaim_atfork() GC_wait_for_reclaim()
+#   endif
+# endif /* PARALLEL_MARK */
+
 /* Called before a fork()               */
 #if defined(GC_ASSERTIONS) && defined(CAN_CALL_ATFORK)
   /* GC_lock_holder is updated safely (no data race actually).  */
@@ -1137,12 +1180,20 @@ static void fork_prepare_proc(void)
                 /* Following waits may include cancellation points. */
 #     if defined(PARALLEL_MARK)
         if (GC_parallel)
-          GC_wait_for_reclaim();
+          wait_for_reclaim_atfork();
 #     endif
       GC_wait_for_gc_completion(TRUE);
 #     if defined(PARALLEL_MARK)
-        if (GC_parallel)
-          GC_acquire_mark_lock();
+        if (GC_parallel) {
+#         if defined(THREAD_SANITIZER) && defined(GC_ASSERTIONS) \
+             && defined(CAN_CALL_ATFORK)
+            /* Prevent TSan false positive about the data race  */
+            /* when updating GC_mark_lock_holder.               */
+            GC_generic_lock(&mark_mutex);
+#         else
+            GC_acquire_mark_lock();
+#         endif
+        }
 #     endif
       GC_acquire_dirty_lock();
 }
@@ -1155,8 +1206,15 @@ static void fork_parent_proc(void)
 {
     GC_release_dirty_lock();
 #   if defined(PARALLEL_MARK)
-      if (GC_parallel)
-        GC_release_mark_lock();
+      if (GC_parallel) {
+#       if defined(THREAD_SANITIZER) && defined(GC_ASSERTIONS) \
+           && defined(CAN_CALL_ATFORK)
+          /* To match that in fork_prepare_proc. */
+          (void)pthread_mutex_unlock(&mark_mutex);
+#       else
+          GC_release_mark_lock();
+#       endif
+      }
 #   endif
     RESTORE_CANCEL(fork_cancel_state);
     UNLOCK();
@@ -1170,8 +1228,14 @@ static void fork_child_proc(void)
 {
     GC_release_dirty_lock();
 #   if defined(PARALLEL_MARK)
-      if (GC_parallel)
-        GC_release_mark_lock();
+      if (GC_parallel) {
+#       if defined(THREAD_SANITIZER) && defined(GC_ASSERTIONS) \
+           && defined(CAN_CALL_ATFORK)
+          (void)pthread_mutex_unlock(&mark_mutex);
+#       else
+          GC_release_mark_lock();
+#       endif
+      }
 #   endif
     /* Clean up the thread table, so that just our thread is left.      */
     GC_remove_all_threads_but_me();
@@ -1365,9 +1429,7 @@ GC_INNER void GC_thr_init(void)
   }
   GC_COND_LOG_PRINTF("Number of processors: %d\n", GC_nprocs);
 
-# if defined(BASE_ATOMIC_OPS_EMULATED) && !defined(GC_DARWIN_THREADS) \
-     && !defined(GC_OPENBSD_UTHREADS) && !defined(NACL) \
-     && !defined(PLATFORM_STOP_WORLD) && !defined(SN_TARGET_PSP2)
+# if defined(BASE_ATOMIC_OPS_EMULATED) && defined(SIGNAL_BASED_STOP_WORLD)
     /* Ensure the process is running on just one CPU core.      */
     /* This is needed because the AO primitives emulated with   */
     /* locks cannot be used inside signal handlers.             */
@@ -1456,25 +1518,18 @@ GC_INNER void GC_init_parallel(void)
   }
 #endif /* !GC_NO_PTHREAD_SIGMASK */
 
-/* Wrapper for functions that are likely to block for an appreciable    */
-/* length of time.                                                      */
-
-GC_INNER void GC_do_blocking_inner(ptr_t data, void * context GC_ATTR_UNUSED)
+static GC_bool do_blocking_enter(GC_thread me)
 {
-    struct blocking_data * d = (struct blocking_data *) data;
-    pthread_t self = pthread_self();
-    GC_thread me;
 #   if defined(SPARC) || defined(IA64)
         ptr_t stack_ptr = GC_save_regs_in_stack();
+        /* TODO: regs saving already done by GC_with_callee_saves_pushed */
+#   elif defined(E2K)
+        size_t stack_size;
 #   endif
-#   if defined(GC_DARWIN_THREADS) && !defined(DARWIN_DONT_PARSE_STACK)
-        GC_bool topOfStackUnset = FALSE;
-#   endif
-    DCL_LOCK_STATE;
+    GC_bool topOfStackUnset = FALSE;
 
-    LOCK();
-    me = GC_lookup_thread(self);
-    GC_ASSERT(!(me -> thread_blocked));
+    GC_ASSERT(I_HOLD_LOCK());
+    GC_ASSERT((me -> flags & DO_BLOCKING) == 0);
 #   ifdef SPARC
         me -> stop_info.stack_ptr = stack_ptr;
 #   else
@@ -1490,22 +1545,90 @@ GC_INNER void GC_do_blocking_inner(ptr_t data, void * context GC_ATTR_UNUSED)
 #   endif
 #   ifdef IA64
         me -> backing_store_ptr = stack_ptr;
+#   elif defined(E2K)
+        GC_ASSERT(NULL == me -> backing_store_end);
+        stack_size = GC_alloc_and_get_procedure_stack(&me->backing_store_end);
+        me->backing_store_ptr = me->backing_store_end + stack_size;
 #   endif
-    me -> thread_blocked = (unsigned char)TRUE;
+    me -> flags |= DO_BLOCKING;
     /* Save context here if we want to support precise stack marking */
-    UNLOCK();
-    d -> client_data = (d -> fn)(d -> client_data);
-    LOCK();   /* This will block if the world is stopped.       */
-#   if defined(CPPCHECK)
-      GC_noop1((word)&me->thread_blocked);
+    return topOfStackUnset;
+}
+
+static void do_blocking_leave(GC_thread me, GC_bool topOfStackUnset)
+{
+    GC_ASSERT(I_HOLD_LOCK());
+    me -> flags &= ~DO_BLOCKING;
+#   ifdef E2K
+        GC_ASSERT(me -> backing_store_end != NULL);
+         /* Note that me->backing_store_end value here may differ from  */
+         /* the one stored in this function previously.                 */
+        GC_INTERNAL_FREE(me -> backing_store_end);
+        me -> backing_store_ptr = NULL;
+        me -> backing_store_end = NULL;
 #   endif
-    me -> thread_blocked = FALSE;
 #   if defined(GC_DARWIN_THREADS) && !defined(DARWIN_DONT_PARSE_STACK)
         if (topOfStackUnset)
             me -> topOfStack = NULL; /* make topOfStack unset again */
+#   else
+        (void)topOfStackUnset;
 #   endif
+}
+
+/* Wrapper for functions that are likely to block for an appreciable    */
+/* length of time.                                                      */
+GC_INNER void GC_do_blocking_inner(ptr_t data, void * context GC_ATTR_UNUSED)
+{
+    struct blocking_data *d = (struct blocking_data *)data;
+    GC_thread me;
+    GC_bool topOfStackUnset;
+    DCL_LOCK_STATE;
+
+    LOCK();
+    me = GC_lookup_thread(pthread_self());
+    topOfStackUnset = do_blocking_enter(me);
+    UNLOCK();
+
+    d -> client_data = (d -> fn)(d -> client_data);
+
+    LOCK();   /* This will block if the world is stopped.       */
+#   if defined(GC_ENABLE_SUSPEND_THREAD) && defined(SIGNAL_BASED_STOP_WORLD)
+      /* Note: this code cannot be moved into do_blocking_leave()   */
+      /* otherwise there could be a static analysis tool warning    */
+      /* (false positive) about unlock without a matching lock.     */
+      while (EXPECT((me -> stop_info.ext_suspend_cnt & 1) != 0, FALSE)) {
+        word suspend_cnt = (word)(me -> stop_info.ext_suspend_cnt);
+                        /* read suspend counter (number) before unlocking */
+
+        UNLOCK();
+        GC_suspend_self_inner(me, suspend_cnt);
+        LOCK();
+      }
+#   endif
+    do_blocking_leave(me, topOfStackUnset);
     UNLOCK();
 }
+
+#if defined(GC_ENABLE_SUSPEND_THREAD) && defined(SIGNAL_BASED_STOP_WORLD)
+  /* Similar to GC_do_blocking_inner() but assuming the GC lock is held */
+  /* and fn is GC_suspend_self_inner.                                   */
+  GC_INNER void GC_suspend_self_blocked(ptr_t thread_me,
+                                        void * context GC_ATTR_UNUSED)
+  {
+    GC_thread me = (GC_thread)thread_me;
+    GC_bool topOfStackUnset = do_blocking_enter(me);
+    DCL_LOCK_STATE;
+
+    do {
+      word suspend_cnt = (word)(me -> stop_info.ext_suspend_cnt);
+
+      UNLOCK();
+      GC_suspend_self_inner(me, suspend_cnt);
+      LOCK();
+    } while ((me -> stop_info.ext_suspend_cnt & 1) != 0);
+    do_blocking_leave(me, topOfStackUnset);
+  }
+#endif
 
 GC_API void GC_CALL GC_set_stackbottom(void *gc_thread_handle,
                                        const struct GC_stack_base *sb)
@@ -1520,7 +1643,7 @@ GC_API void GC_CALL GC_set_stackbottom(void *gc_thread_handle,
         if (NULL == t) /* current thread? */
             t = GC_lookup_thread(pthread_self());
         GC_ASSERT((t -> flags & FINISHED) == 0);
-        GC_ASSERT(!(t -> thread_blocked)
+        GC_ASSERT((t -> flags & DO_BLOCKING) == 0
                   && NULL == t -> traced_stack_sect); /* for now */
 
         if ((t -> flags & MAIN_THREAD) == 0) {
@@ -1552,11 +1675,15 @@ GC_API void * GC_CALL GC_get_my_stackbottom(struct GC_stack_base *sb)
         sb -> mem_base = me -> stack_end;
 #       ifdef IA64
             sb -> reg_base = me -> backing_store_end;
+#       elif defined(E2K)
+            sb -> reg_base = NULL;
 #       endif
     } else {
         sb -> mem_base = GC_stackbottom;
 #       ifdef IA64
             sb -> reg_base = GC_register_stackbottom;
+#       elif defined(E2K)
+            sb -> reg_base = NULL;
 #       endif
     }
     UNLOCK();
@@ -1573,6 +1700,9 @@ GC_API void * GC_CALL GC_call_with_gc_active(GC_fn_type fn,
     struct GC_traced_stack_sect_s stacksect;
     pthread_t self = pthread_self();
     GC_thread me;
+#   ifdef E2K
+      size_t stack_size;
+#   endif
     DCL_LOCK_STATE;
 
     LOCK();   /* This will block if the world is stopped.       */
@@ -1590,7 +1720,7 @@ GC_API void * GC_CALL GC_call_with_gc_active(GC_fn_type fn,
         GC_stackbottom = (ptr_t)COVERT_DATAFLOW(&stacksect);
     }
 
-    if (!me->thread_blocked) {
+    if ((me -> flags & DO_BLOCKING) == 0) {
       /* We are not inside GC_do_blocking() - do nothing more.  */
       UNLOCK();
       client_data = fn(client_data);
@@ -1598,6 +1728,15 @@ GC_API void * GC_CALL GC_call_with_gc_active(GC_fn_type fn,
       GC_noop1(COVERT_DATAFLOW(&stacksect));
       return client_data; /* result */
     }
+
+#   if defined(GC_ENABLE_SUSPEND_THREAD) && defined(SIGNAL_BASED_STOP_WORLD)
+      while (EXPECT((me -> stop_info.ext_suspend_cnt & 1) != 0, FALSE)) {
+        word suspend_cnt = (word)(me -> stop_info.ext_suspend_cnt);
+        UNLOCK();
+        GC_suspend_self_inner(me, suspend_cnt);
+        LOCK();
+      }
+#   endif
 
     /* Setup new "stack section".       */
     stacksect.saved_stack_ptr = me -> stop_info.stack_ptr;
@@ -1607,26 +1746,38 @@ GC_API void * GC_CALL GC_call_with_gc_active(GC_fn_type fn,
       /* Unnecessarily flushes register stack,          */
       /* but that probably doesn't hurt.                */
       stacksect.saved_backing_store_ptr = me -> backing_store_ptr;
+#   elif defined(E2K)
+      GC_ASSERT(me -> backing_store_end != NULL);
+      GC_INTERNAL_FREE(me -> backing_store_end);
+      me -> backing_store_ptr = NULL;
+      me -> backing_store_end = NULL;
 #   endif
     stacksect.prev = me -> traced_stack_sect;
-    me -> thread_blocked = FALSE;
+    me -> flags &= ~DO_BLOCKING;
     me -> traced_stack_sect = &stacksect;
 
     UNLOCK();
     client_data = fn(client_data);
-    GC_ASSERT(me -> thread_blocked == FALSE);
+    GC_ASSERT((me -> flags & DO_BLOCKING) == 0);
     GC_ASSERT(me -> traced_stack_sect == &stacksect);
 
     /* Restore original "stack section".        */
 #   if defined(CPPCHECK)
       GC_noop1((word)me->traced_stack_sect);
 #   endif
+#   ifdef E2K
+      (void)GC_save_regs_in_stack();
+#   endif
     LOCK();
     me -> traced_stack_sect = stacksect.prev;
 #   ifdef IA64
       me -> backing_store_ptr = stacksect.saved_backing_store_ptr;
+#   elif defined(E2K)
+      GC_ASSERT(NULL == me -> backing_store_end);
+      stack_size = GC_alloc_and_get_procedure_stack(&me->backing_store_end);
+      me->backing_store_ptr = me->backing_store_end + stack_size;
 #   endif
-    me -> thread_blocked = (unsigned char)TRUE;
+    me -> flags |= DO_BLOCKING;
     me -> stop_info.stack_ptr = stacksect.saved_stack_ptr;
     UNLOCK();
 
@@ -1915,6 +2066,12 @@ GC_API int GC_CALL GC_register_my_thread(const struct GC_stack_base *sb)
 #       endif
 #       if defined(THREAD_LOCAL_ALLOC)
           GC_init_thread_local(&(me->tlfs));
+#       endif
+#       if defined(GC_ENABLE_SUSPEND_THREAD) \
+           && defined(SIGNAL_BASED_STOP_WORLD)
+          if ((me -> stop_info.ext_suspend_cnt & 1) != 0) {
+            GC_with_callee_saves_pushed(GC_suspend_self_blocked, (ptr_t)me);
+          }
 #       endif
         UNLOCK();
         return GC_SUCCESS;
@@ -2306,20 +2463,6 @@ yield:
 #   define UNSET_MARK_LOCK_HOLDER (void)0
 # endif /* !GC_ASSERTIONS */
 
-#ifdef GLIBC_2_1_MUTEX_HACK
-  /* Ugly workaround for a linux threads bug in the final versions      */
-  /* of glibc2.1.  Pthread_mutex_trylock sets the mutex owner           */
-  /* field even when it fails to acquire the mutex.  This causes        */
-  /* pthread_cond_wait to die.  Remove for glibc2.2.                    */
-  /* According to the man page, we should use                           */
-  /* PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP, but that isn't actually   */
-  /* defined.                                                           */
-  static pthread_mutex_t mark_mutex =
-        {0, 0, 0, PTHREAD_MUTEX_ERRORCHECK_NP, {0, 0}};
-#else
-  static pthread_mutex_t mark_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
-
 static pthread_cond_t builder_cv = PTHREAD_COND_INITIALIZER;
 
 static void setup_mark_lock(void)
@@ -2387,6 +2530,20 @@ GC_INNER void GC_wait_for_reclaim(void)
     }
     GC_release_mark_lock();
 }
+
+# if defined(CAN_HANDLE_FORK) && defined(THREAD_SANITIZER)
+    /* Identical to GC_wait_for_reclaim() but with the no_sanitize      */
+    /* attribute as a workaround for TSan which does not notice that    */
+    /* the GC lock is acquired in fork_prepare_proc().                  */
+    GC_ATTR_NO_SANITIZE_THREAD
+    static void wait_for_reclaim_atfork(void)
+    {
+      GC_acquire_mark_lock();
+      while (GC_fl_builder_count > 0)
+        GC_wait_builder();
+      GC_release_mark_lock();
+    }
+# endif /* CAN_HANDLE_FORK && THREAD_SANITIZER */
 
 GC_INNER void GC_notify_all_builder(void)
 {

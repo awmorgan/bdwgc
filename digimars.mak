@@ -2,10 +2,11 @@
 # compiler from www.digitalmars.com
 # Written by Walter Bright
 
+CFLAGS_EXTRA=
 DEFINES=-D_WINDOWS -DGC_DLL -DGC_THREADS -DGC_DISCOVER_TASK_THREADS \
     -DALL_INTERIOR_POINTERS -DENABLE_DISCLAIM -DGC_ATOMIC_UNCOLLECTABLE \
     -DGC_GCJ_SUPPORT -DJAVA_FINALIZATION -DNO_EXECUTE_PERMISSION -DUSE_MUNMAP
-CFLAGS=-Iinclude -Ilibatomic_ops\src $(DEFINES) -wx -g
+CFLAGS=-Iinclude -Ilibatomic_ops\src $(DEFINES) -g $(CFLAGS_EXTRA)
 LFLAGS=/ma/implib/co
 CC=sc
 
@@ -20,9 +21,9 @@ gc.obj: extra\gc.c
 
 OBJS= gc.obj gc_badalc.obj gc_cpp.obj
 
-check: gctest.exe test_cpp.exe
+check: gctest.exe cpptest.exe
 	gctest.exe
-	test_cpp.exe
+	cpptest.exe
 
 gc.lib: gc.dll
 
@@ -38,21 +39,21 @@ gc.def: digimars.mak
 	echo GC_is_valid_displacement_print_proc >>gc.def
 
 clean:
-	del *.log gc.def gc.dll gc.lib gc.map gctest.map test_cpp.map
-	del tests\test.obj gctest.exe tests\test_cpp.obj test_cpp.exe
+	del *.log gc.def gc.dll gc.lib gc.map gctest.map cpptest.map
+	del tests\gctest.obj gctest.exe tests\cpptest.obj cpptest.exe
 	del $(OBJS)
 
-gctest.exe: gc.lib tests\test.obj
-	$(CC) -ogctest.exe tests\test.obj gc.lib
+gctest.exe: gc.lib tests\gctest.obj
+	$(CC) -ogctest.exe tests\gctest.obj gc.lib
 
-tests\test.obj: tests\test.c
-	$(CC) -c $(CFLAGS) tests\test.c -otests\test.obj
+tests\gctest.obj: tests\gctest.c
+	$(CC) -c $(CFLAGS) tests\gctest.c -otests\gctest.obj
 
-test_cpp.exe: gc.lib tests\test_cpp.obj
-	$(CC) -otest_cpp.exe tests\test_cpp.obj gc.lib
+cpptest.exe: gc.lib tests\cpptest.obj
+	$(CC) -ocpptest.exe tests\cpptest.obj gc.lib
 
-tests\test_cpp.obj: tests\test_cpp.cc
-	$(CC) -c $(CFLAGS) -cpp tests\test_cpp.cc -otests\test_cpp.obj
+tests\cpptest.obj: tests\cpp.cc
+	$(CC) -c $(CFLAGS) -cpp tests\cpp.cc -otests\cpptest.obj
 
 gc_badalc.obj: gc_badalc.cc gc_badalc.cpp
 gc_cpp.obj: gc_cpp.cc gc_cpp.cpp

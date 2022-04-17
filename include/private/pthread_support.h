@@ -24,7 +24,7 @@
 
 #if defined(GC_DARWIN_THREADS)
 # include "darwin_stop_world.h"
-#else
+#elif defined(PTHREAD_STOP_WORLD_IMPL)
 # include "pthread_stop_world.h"
 #endif
 
@@ -66,11 +66,6 @@ typedef struct GC_Thread_Rep {
     /* Extra bookkeeping information the stopping code uses */
     struct thread_stop_info stop_info;
 
-#   if defined(GC_ENABLE_SUSPEND_THREAD) && !defined(GC_DARWIN_THREADS) \
-        && !defined(GC_OPENBSD_UTHREADS) && !defined(NACL)
-      volatile AO_t suspended_ext;  /* Thread was suspended externally. */
-#   endif
-
     unsigned char flags;        /* Protected by GC lock.                */
 #       define FINISHED 1       /* Thread has exited.                   */
 #       define DETACHED 2       /* Thread is treated as detached.       */
@@ -83,15 +78,11 @@ typedef struct GC_Thread_Rep {
 #       define MAIN_THREAD 4    /* True for the original thread only.   */
 #       define DISABLED_GC 0x10 /* Collections are disabled while the   */
                                 /* thread is exiting.                   */
-
-    unsigned char thread_blocked;
-                                /* Protected by GC lock.                */
-                                /* Treated as a boolean value.  If set, */
-                                /* thread will acquire GC lock before   */
-                                /* doing any pointer manipulations, and */
-                                /* has set its SP value.  Thus it does  */
-                                /* not need to be sent a signal to stop */
-                                /* it.                                  */
+#       define DO_BLOCKING 0x20 /* Thread is in do-blocking state.      */
+                                /* If set, thread will acquire GC lock  */
+                                /* before any pointer manipulation, and */
+                                /* has set its SP value.  Thus, it does */
+                                /* not need a signal sent to stop it.   */
 
     unsigned short finalizer_skipped;
     unsigned char finalizer_nested;
@@ -113,8 +104,8 @@ typedef struct GC_Thread_Rep {
                                 /* valid only if the thread is blocked; */
                                 /* non-NULL value means already set.    */
 #   endif
-#   ifdef IA64
-        ptr_t backing_store_end;
+#   if defined(E2K) || defined(IA64)
+        ptr_t backing_store_end; /* Note: may reference data in GC heap */
         ptr_t backing_store_ptr;
 #   endif
 
@@ -166,6 +157,13 @@ GC_INNER GC_thread GC_lookup_thread(pthread_t id);
 
 #ifdef GC_EXPLICIT_SIGNALS_UNBLOCK
   GC_INNER void GC_unblock_gc_signals(void);
+#endif
+
+#if defined(GC_ENABLE_SUSPEND_THREAD) && defined(SIGNAL_BASED_STOP_WORLD)
+  GC_INNER void GC_suspend_self_inner(GC_thread me, word suspend_cnt);
+
+  GC_INNER void GC_suspend_self_blocked(ptr_t thread_me, void *context);
+                                /* Wrapper over GC_suspend_self_inner.  */
 #endif
 
 #ifdef GC_PTHREAD_START_STANDALONE

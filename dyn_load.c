@@ -232,6 +232,7 @@ GC_INNER void GC_register_dynamic_libraries(void)
 {
   struct link_map *lm;
 
+  GC_ASSERT(I_HOLD_LOCK());
   for (lm = GC_FirstDLOpenedLinkMap(); lm != 0; lm = lm->l_next) {
         ElfW(Ehdr) * e;
         ElfW(Phdr) * p;
@@ -308,7 +309,7 @@ static void sort_heap_sects(struct HeapSect *base, size_t number_of_elements)
 
 STATIC void GC_register_map_entries(const char *maps)
 {
-    const char *prot;
+    const char *prot, *path;
     ptr_t start, end;
     unsigned int maj_dev;
     ptr_t least_ha, greatest_ha;
@@ -321,7 +322,7 @@ STATIC void GC_register_map_entries(const char *maps)
                   + GC_our_memory[GC_n_memory-1].hs_bytes;
 
     for (;;) {
-        maps = GC_parse_map_entry(maps, &start, &end, &prot, &maj_dev, 0);
+        maps = GC_parse_map_entry(maps, &start, &end, &prot, &maj_dev, &path);
         if (NULL == maps) break;
 
         if (prot[1] == 'w') {
@@ -333,6 +334,15 @@ STATIC void GC_register_map_entries(const char *maps)
                 /* Stack mapping; discard       */
                 continue;
             }
+#           if defined(E2K) && defined(__ptr64__)
+              /* TODO: avoid hard-coded addresses */
+              if ((word)start == 0xc2fffffff000UL
+                  && (word)end == 0xc30000000000UL && path[0] == '\n')
+                continue; /* discard some special mapping */
+#           endif
+            if (path[0] == '[' && strncmp(path+1, "heap]", 5) != 0)
+              continue; /* discard if a pseudo-path unless "[heap]" */
+
 #           ifdef THREADS
               /* This may fail, since a thread may already be           */
               /* unregistered, but its thread stack may still be there. */
@@ -753,6 +763,7 @@ GC_INNER void GC_register_dynamic_libraries(void)
 {
   struct link_map *lm;
 
+  GC_ASSERT(I_HOLD_LOCK());
 # ifdef HAVE_DL_ITERATE_PHDR
     if (GC_register_dynamic_libraries_dl_iterate_phdr()) {
         return;
@@ -811,9 +822,10 @@ GC_INNER void GC_register_dynamic_libraries(void)
 GC_INNER void GC_register_dynamic_libraries(void)
 {
     static int fd = -1;
-    char buf[30];
     static prmap_t * addr_map = 0;
     static int current_sz = 0;  /* Number of records currently in addr_map */
+
+    char buf[32];
     int needed_sz = 0;          /* Required size of addr_map            */
     int i;
     long flags;
@@ -826,6 +838,7 @@ GC_INNER void GC_register_dynamic_libraries(void)
 #     define MA_PHYS 0
 #   endif /* SOLARISDL */
 
+    GC_ASSERT(I_HOLD_LOCK());
     if (fd < 0) {
       (void)snprintf(buf, sizeof(buf), "/proc/%ld", (long)getpid());
       buf[sizeof(buf) - 1] = '\0';
@@ -1005,6 +1018,7 @@ GC_INNER void GC_register_dynamic_libraries(void)
     char * base;
     char * limit, * new_limit;
 
+    GC_ASSERT(I_HOLD_LOCK());
 #   ifdef MSWIN32
       if (GC_no_win32_dlls) return;
 #   endif

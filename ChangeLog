@@ -1,4 +1,168 @@
 
+== [8.3.0] (development) ==
+
+* Add 'lib' prefix to build artifact names in Makefile.direct
+* Add I_HOLD_LOCK assertion to scratch_alloc/recycle and their callers
+* Add assertion to ensure GC_unmapped_bytes cannot underflow
+* Add check-deps goal to Makefiles to build the tests but not execute them
+* Add missing undef GC_NO_THREAD_REDIRECTS in threaded tests
+* Adjust comments in block_unmap_inner
+* Adjust printing on amount of unmapped memory after GC
+* Allow disable USE_PROC_FOR_LIBRARIES even if malloc is redirected on Linux
+* Allow mprotect-based incremental GC on AIX and for all Linux targets
+* Allow testing of retry-signals functionality
+* Allow to build with forced WRAP_MARK_SOME
+* Allow to skip heap expansion in GC_init
+* Allow to unmap memory block right in GC cycle where block is freed
+* Always set only one bit past end in GC_set_hdr_marks
+* Assert SET_HDR does not write to GC_all_nils
+* Avoid unmap of memory allocated during GC init regardless of threshold
+* Better document GC_generate_random_heap/valid_address API functions
+* Build extra/gc.c in digimars.mak
+* Change minimum heap growth to one block if requested explicitly
+* Change p local variable to current_p in push_all/conditional_eager
+* Check pointer tag in all mark procedures (E2K)
+* Declare GC_register_stackbottom symbol as internal on IA64 (refactoring)
+* Define GC_save_regs_ret_val variable only if used on IA64 (refactoring)
+* Define marker_[b]sp only if needed (refactoring)
+* Disable H/W tag checking in mark procedures by default (E2K)
+* Disable memory unmapping explicitly in gcconfig.h for Emscripten
+* Discard sections with pseudo-paths except heap in register_map_entries
+* Do not compile pthread_start.c on Cygwin even if build shared libs (CMake)
+* Do not compile pthread_stop_world.c on Darwin (CMake)
+* Do not put atomic_ops[_sysdeps].o to libgc.a in Makefile.direct
+* Do not treat warnings as errors by default in digimars.mak
+* Document argument of GC_is_marked in gc_mark.h
+* Eliminate 'checking if 1U<<12 is less than zero' cppcheck FP warning
+* Eliminate 'n obtained from untrusted source' code defect FP in test_cpp
+* Enable prefetch loop in GC_mark_from on E2K
+* Enable without_libatomic_ops for targets requiring atomic_ops.c (CMake)
+* Ensure GC_n_set_marks() does not count extra bits in hb_marks
+* Ensure a collection occurs between adjacent heap expansions
+* Ensure every test prints a message on success
+* Fail threadkeytest on pthread_create error in main loop
+* Fix digimars.mak to build 'all' by default
+* Group NEED_FIND_LIMIT definitions in gcconfig.h (refactoring)
+* Increase number of iterations in leak and middle tests
+* Make abort message unique in write_fault_handler
+* Make all functions static in msvc_dbg.c except for backtrace[_symbols]
+* Mention CMake-based build in README.md and README.QUICK
+* Move non-cord [pkg]include_HEADERS assignments to include.am (refactoring)
+* Move non-license info from LICENSE file to README and vice versa
+* Move public header files to include/gc in source tree
+* Name all tests consistently (refactoring)
+* New CMake option to link with external libatomic_ops (system library)
+* Pass ATOMIC_OPS_LIBS to tests using AO primitives directly (Automake)
+* Prevent requesting blocks past max_heapsize in GC_collect_or_expand
+* Print in-use heap statistic on heap growth
+* Print iteration number on thread creation or join failure in tests
+* Print objs_in_block as zero for large objects in GC_print_block_list
+* Print thread number on marker thread creation failure
+* Put gc_badalc/cpp.cpp instead of .cc ones in CMake script (MSVC/BCC/WCC)
+* Really ignore bad GC_INITIAL/MAXIMUM_HEAP_SIZE values
+* Reduce number of iterations in disclaim and cpp tests
+* Refactoring of GC_n_set_marks and GC_print_block_descr
+* Refine column names output by GC_print_block_list
+* Relax required dependencies for atomicopstest (CMake)
+* Remove GC_copyright symbol
+* Remove GC_min/max() and simplify heap bounds update in expand_hp_inner
+* Remove IF_IA64 macro in pthread_stop_world (refactoring)
+* Remove STACK_GROWS_DOWN explicit definitions in gcconfig.h (refactoring)
+* Remove Symbian makefile
+* Remove ancient OS2_MAKEFILE, PCR-Makefile, SMakefile.amiga
+* Remove comment from gc_cpp.h about bugs in ancient compilers
+* Remove doc.am, and move gc.man to base folder (refactoring)
+* Remove duplication of random numbers generator formula (refactoring)
+* Remove msvc_dbg.h file (refactoring)
+* Remove obsolete AC_PROG_LIBTOOL in configure.ac (refactoring)
+* Remove redundant 'private' prefix in include directives in include/private
+* Remove specific DATASTART definition for ancient OpenBSD/m68k
+* Rename MAP_LEN internal macro to OBJ_MAP_LEN (refactoring)
+* Rename README.QUICK to LICENSE and install it by default
+* Rename README.rs6000 to README.aix
+* Reorder macro definitions for rare architectures in gcconfig.h
+* Replace init_netbsd_elf with init_linux_data_start on NetBSD (refactoring)
+* Replace obsolete AC_TRY_COMPILE/LINK/RUN in configure.ac (refactoring)
+* Return free memory to OS explicitly before getting new memory from OS
+* Roundup size passed to GC_expand_hp
+* State explicitly that license is MIT-style
+* Support CFLAGS_EXTRA in rare build scripts (NT/WCC_MAKEFILE, digimars.mak)
+* Support malloc redirection on E2K
+* Treat GC_arrays as a part of internal memory when printing its size
+* Try find libatomic_ops installed by cmake if with_libatomic_ops (CMake)
+* Use GC_printf in cpptest consistently (refactoring)
+* Warn if heap has grown while GC was disabled
+
+
+== [8.2.2] (not released yet) ==
+
+* Add CMake option to force libatomic_ops headers usage
+* Add _PROP suffix to CORD/GC[CPP]_VERSION variables in CMake script
+* Allow not to bypass pthread_cancel hardening in pthread_start
+* Distribute gc_gcj.h and some other headers in single-obj-compilation
+* Do not call SET_HDR() to remove forwarding counts if none exists in hblk
+* Do not call mprotect/mmap to GC_unmap/remap (Linux)
+* Do not count unmapped regions if GC_unmap is madvise-based (Linux)
+* Do not fail tests if pthread_create returns resource unavailable error
+* Do not name GCC intrinsics as C11 ones
+* Do not probe to find main data root start if dl_iterate_phdr exists
+* Eliminate '-pedantic is not option that controls warnings' GCC-6.3 message
+* Eliminate '/GS can not protect parameters' MS VC warning in msvc_dbg
+* Eliminate 'buffer overflow detected' FP error in realloc_test
+* Eliminate 'function/data pointer conversion in expression' MSVC warning
+* Eliminate 'layout of aggregates has changed in GCC 5' warning in test_cpp
+* Eliminate 'new_l may be used uninitialized' gcc warning in os_dep (Cygwin)
+* Eliminate 'old_gc_no is initialized but not referenced' MS VC false warning
+* Eliminate 'potentially uninitialized local variable tc' warning (MSVC)
+* Eliminate 'skipping config since MAX_HEAP_SECTS is unknown' cppcheck FP
+* Eliminate 'value exceeds maximum object size' gcc warning in debug_malloc
+* Eliminate 'value exceeds maximum object size' gcc warnings in huge_test
+* Eliminate 'writing into region of size 0' gcc FP warning in realloc
+* Eliminate code defect about incorrect size of allocated object (leaktest)
+* Eliminate division-by-zero FP warning in GC_ASSERT in reclaim_block
+* Eliminate stringop-overflow gcc-12 warning in CORD__next
+* Fix 'GC_greatest_stack_base_below is defined but not used' warning (IA64)
+* Fix 'GC_text_mapping not used' GCC warning if redirect malloc w/o threads
+* Fix 'ISO C forbids conversion of function pointer to object' warning
+* Fix 'undeclared getpagesize' compiler warning on AIX and OSF1
+* Fix 'unresolved __imp__wsprintfA' linker error in msvc_dbg.c (MSVC)
+* Fix 'unresolved symbol GetModuleHandle' error in win32_threads.c (UWP)
+* Fix (workaround) stack overflow in gctest on Alpine Linux/s390x
+* Fix GC_allocate_ml incorrect cleanup in GC_deinit if pthreads (MinGW)
+* Fix GC_unmapped_bytes update in GC_unmap for Sony PS/3
+* Fix abort when GC_repeat_read returns zero
+* Fix hang in GC_free if GC_PREFER_MPROTECT_VDB (Mingw64)
+* Fix lock assertion violation in GC_find_limit if always multi-threaded
+* Fix memory return to OS in GC_unmap
+* Fix missing lock when GC_generate_random_valid_address is called
+* Fix missing write() declaration if CONSOLE_LOG (Watcom)
+* Fix nodist_libgc_la_SOURCES value in Makefile.am for Solaris/sparc
+* Fix oldProc initialization in gc_cleanup and eliminate related warnings
+* Fix parallel_initialized assertion violation in initsecondarythread (Win32)
+* Fix typos in comments and debugging.md
+* Fix undefined __stack_base__ on UWP/arm64 (llvm-mingw)
+* Move platform-specific sleep call to GC_usleep (refactoring)
+* Refer to Makefile.direct instead of deleted Makefile file in README
+* Relax assertion of hb_n_marks in reclaim_block if more than two markers
+* Remove IF_IA64 macro in pthread_stop_world (refactoring)
+* Remove checking of RS6000 completely
+* Remove duplicate include gc_tiny_fl.h in gc_priv.h
+* Remove non-working check of M68K in gctest
+* Replace RAISE_SIGNAL macro with a static function (refactoring)
+* Retry pthread_kill if EAGAIN (Linux)
+* Revert addition of msvc_dbg.h in include.am
+* Start configure help messages with a lower case letter
+* Support GCC MCF thread model (mcfgthreads) in configure (MinGW)
+* Support OpenBSD/riscv64
+* Support space-separated flags in CFLAGS_EXTRA passed to CMake
+* Update README.win32 about default build configuration (configure, cmake)
+* Workaround 'info is not assigned' cppcheck FP if assertions on (OS X)
+* Workaround Thread Sanitizer (TSan) FP warning in is_valid_displacement
+* Workaround crash in FreeBSD rand() by avoiding its concurrent usage
+* Workaround gctest hang if test compiled as C++ code by MSVC (CMake)
+* Workaround msvc_dbg.c build failure on arm[64] (MSVC)
+
+
 == [8.2.0] 2021-09-29 ==
 
 * Add API for accessing incremental GC time limit with nanosecond precision
@@ -215,6 +379,42 @@
 * Workaround 'push_regs configured incorrectly' error (GCC-11)
 * Workaround 'same value in both branches of ternary operator' cppcheck FP
 * Workaround various cppcheck false positives
+
+
+== [8.0.8] (not released yet) ==
+
+* Distribute gc_disclaim.h in single-obj-compilation
+* Do not name GCC intrinsics as C11 ones
+* Eliminate 'buffer overflow detected' FP error in realloc_test
+* Eliminate 'function/data pointer conversion in expression' MSVC warning
+* Eliminate 'new_l may be used uninitialized' gcc warning in os_dep (Cygwin)
+* Eliminate 'old_gc_no is initialized but not referenced' MS VC false warning
+* Eliminate 'value exceeds maximum object size' gcc warning in debug_malloc
+* Eliminate 'value exceeds maximum object size' gcc warnings in huge_test
+* Eliminate 'writing into region of size 0' gcc FP warning in realloc
+* Eliminate stringop-overflow gcc-12 warning in CORD__next
+* Fix 'GC_greatest_stack_base_below is defined but not used' warning (IA64)
+* Fix 'GC_text_mapping not used' GCC warning if redirect malloc w/o threads
+* Fix 'ISO C forbids conversion of function pointer to object' warning
+* Fix 'undeclared getpagesize' compiler warning on AIX and OSF1
+* Fix GC_allocate_ml incorrect cleanup in GC_deinit if pthreads (MinGW)
+* Fix GC_unmapped_bytes update in GC_unmap for Sony PS/3
+* Fix get_maps failure when GC_repeat_read returns zero
+* Fix hang in GC_free if GC_PREFER_MPROTECT_VDB (Mingw64)
+* Fix lock assertion violation in GC_find_limit if always multi-threaded
+* Fix missing lock when GC_generate_random_valid_address is called
+* Fix nodist_libgc_la_SOURCES value in Makefile.am for Solaris/sparc
+* Fix oldProc initialization in gc_cleanup and eliminate related warnings
+* Fix parallel_initialized assertion violation in initsecondarythread (Win32)
+* Fix stack overflow in gctest on Alpine Linux/s390x
+* Fix typos in debugging.md, in comments of allchblk.c, finalize.c, gc.h
+* Fix undefined __stack_base__ on UWP/arm64 (llvm-mingw)
+* Refer to Makefile.direct instead of deleted Makefile file in README
+* Remove checking of RS6000 completely
+* Remove non-working check of M68K in gctest
+* Revert addition of msvc_dbg.h in include.am
+* Workaround Thread Sanitizer (TSan) FP warning in is_valid_displacement
+* Workaround crash in FreeBSD rand() by avoiding its concurrent usage (tests)
 
 
 == [8.0.6] 2021-09-28 ==
@@ -631,6 +831,16 @@
 * Workaround 'bad pointer arithmetic' false waring in check_annotated_obj
 * Workaround Clang optimizer bug crashing clear_stack_inner on OS X 10.8
 * Workaround Thread Sanitizer (TSan) false positive warnings
+
+
+== [7.6.16] (not released yet) ==
+
+* Eliminate 'old_gc_no is initialized but not referenced' MS VC false warning
+* Fix 'GC_greatest_stack_base_below is defined but not used' warning (IA64)
+* Fix lock assertion violation in GC_find_limit if always multi-threaded
+* Workaround Thread Sanitizer (TSan) FP warning in is_valid_displacement
+
+Also, includes 7.4.22 changes
 
 
 == [7.6.14] 2021-09-28 ==
@@ -1174,6 +1384,16 @@ Also, includes 7.4.6 changes
 Also, includes 7.4.4 changes
 
 
+== [7.4.22] (not released yet) ==
+
+* Eliminate 'new_l may be used uninitialized' gcc warning in os_dep (Cygwin)
+* Fix 'undeclared getpagesize' compiler warning on AIX and OSF1
+* Fix stack overflow in gctest on Alpine Linux/s390x
+* Workaround crash in FreeBSD rand() by avoiding its concurrent usage
+
+Also, includes 7.2p changes.
+
+
 == [7.4.20] 2021-09-28 ==
 
 * Do not hold GC_fault_handler_lock when in Sleep (Windows)
@@ -1698,6 +1918,20 @@ Also, includes 7.2e, 7.2d, 7.2c, 7.2b changes
 * Use pthread_key for thread-local storage on FreeBSD
 * Use union of AO_t and word to favor strict-aliasing compiler optimization
 Also, includes 7.2 changes
+
+
+== [7.2p] (not released yet) ==
+
+* Fix get_maps failure when GC_repeat_read returns zero
+* Fix missing lock when GC_generate_random_valid_address is called
+* Fix nodist_libgc_la_SOURCES value in Makefile.am for Solaris/sparc
+* Fix oldProc initialization in gc_cleanup and eliminate related warnings
+* Fix parallel_initialized assertion violation in initsecondarythread (Win32)
+* Fix typos in debugging.html, in comments of allchblk.c, finalize.c, gc.h
+* Refer to Makefile.direct instead of deleted Makefile file in README
+* Remove checking of RS6000 completely
+* Remove non-working check of M68K in gctest
+* Revert addition of msvc_dbg.h in include.am
 
 
 == [7.2o] 2021-09-28 ==
@@ -5510,7 +5744,7 @@ replacing GC_never_stop_func with GC_default_stop_func (if
 possible).
 * alloc.c (GC_gcollect): Use GC_default_stop_func.
 * alloc.c (GC_collect_or_expand): Use GC_default_stop_func
-(instead of GC_never_stop_func) unless it is trigged due to out of
+(instead of GC_never_stop_func) unless it is triggered due to out of
 memory; don't increment GC_fail_count and don't output warning
 (before trying to collect again) in case the collection has been
 interrupted (by GC_default_stop_func) and the heap expansion has
@@ -7143,7 +7377,7 @@ GC_delete_gc_thread.
 * misc.c: Declare GC_thr_init().
 
 * allchblk.c (add_to_fl): disable assertions with USE_MUNMAP,
-and refine assertions to handle huge unmergable blocks.
+and refine assertions to handle huge unmergeable blocks.
 (GC_allochblk_nth): Add comment.
 
 * include/private/gcconfig.h: Add missing FREEBSD macro

@@ -317,7 +317,6 @@ STATIC void GC_remove_root_at_pos(int i)
 
 #if defined(DYNAMIC_LOADING) || defined(MSWIN32) || defined(MSWINCE) \
      || defined(PCR) || defined(CYGWIN32)
-/* Internal use only; lock held.        */
 STATIC void GC_remove_tmp_roots(void)
 {
     int i;
@@ -325,6 +324,7 @@ STATIC void GC_remove_tmp_roots(void)
       int old_n_roots = n_root_sets;
 #   endif
 
+    GC_ASSERT(I_HOLD_LOCK());
     for (i = 0; i < n_root_sets; ) {
         if (GC_static_roots[i].r_tmp) {
             GC_remove_root_at_pos(i);
@@ -500,8 +500,11 @@ STATIC void GC_remove_tmp_roots(void)
 GC_INNER ptr_t GC_approx_sp(void)
 {
     volatile word sp;
-#   if defined(S390) && !defined(CPPCHECK) && (__clang_major__ < 8)
-        /* Workaround a crash in SystemZTargetLowering of libLLVM-3.8.  */
+#   if ((defined(E2K) && defined(__clang__)) \
+        || (defined(S390) && (__clang_major__ < 8))) && !defined(CPPCHECK)
+        /* Workaround some bugs in clang:                                   */
+        /* "undefined reference to llvm.frameaddress" error (clang-9/e2k);  */
+        /* a crash in SystemZTargetLowering of libLLVM-3.8 (S390).          */
         sp = (word)&sp;
 #   elif defined(CPPCHECK) || (__GNUC__ >= 4 /* GC_GNUC_PREREQ(4, 0) */ \
                                && !defined(STACK_NOT_SCANNED))
@@ -644,12 +647,15 @@ STATIC void GC_push_conditional_with_exclusions(ptr_t bottom, ptr_t top,
     }
 }
 
-#ifdef IA64
+#if defined(E2K) || defined(IA64)
   /* Similar to GC_push_all_stack_sections() but for IA-64 registers store. */
   GC_INNER void GC_push_all_register_sections(ptr_t bs_lo, ptr_t bs_hi,
                   int eager, struct GC_traced_stack_sect_s *traced_stack_sect)
   {
-    while (traced_stack_sect != NULL) {
+#   ifdef E2K
+      (void)traced_stack_sect; /* TODO: Not implemented yet */
+#   else
+      while (traced_stack_sect != NULL) {
         ptr_t frame_bs_lo = traced_stack_sect -> backing_store_end;
         GC_ASSERT((word)frame_bs_lo <= (word)bs_hi);
         if (eager) {
@@ -659,7 +665,8 @@ STATIC void GC_push_conditional_with_exclusions(ptr_t bottom, ptr_t top,
         }
         bs_hi = traced_stack_sect -> saved_backing_store_ptr;
         traced_stack_sect = traced_stack_sect -> prev;
-    }
+      }
+#   endif
     GC_ASSERT((word)bs_lo <= (word)bs_hi);
     if (eager) {
         GC_push_all_eager(bs_lo, bs_hi);
@@ -667,7 +674,7 @@ STATIC void GC_push_conditional_with_exclusions(ptr_t bottom, ptr_t top,
         GC_push_all_stack(bs_lo, bs_hi);
     }
   }
-#endif /* IA64 */
+#endif /* E2K || IA64 */
 
 #ifdef THREADS
 
@@ -799,12 +806,12 @@ STATIC void GC_push_current_stack(ptr_t cold_gc_frame,
         GC_push_all_stack_part_eager_sections(GC_approx_sp(), GC_stackbottom,
                                         cold_gc_frame, GC_traced_stack_sect);
 #       ifdef IA64
-              /* We also need to push the register stack backing store. */
-              /* This should really be done in the same way as the      */
-              /* regular stack.  For now we fudge it a bit.             */
-              /* Note that the backing store grows up, so we can't use  */
-              /* GC_push_all_stack_partially_eager.                     */
-              {
+            /* We also need to push the register stack backing store.   */
+            /* This should really be done in the same way as the        */
+            /* regular stack.  For now we fudge it a bit.               */
+            /* Note that the backing store grows up, so we can't use    */
+            /* GC_push_all_stack_partially_eager.                       */
+            {
                 ptr_t bsp = GC_save_regs_ret_val;
                 ptr_t cold_gc_bs_pointer = bsp - 2048;
                 if (GC_all_interior_pointers
@@ -825,7 +832,20 @@ STATIC void GC_push_current_stack(ptr_t cold_gc_frame,
                 }
                 /* All values should be sufficiently aligned that we    */
                 /* don't have to worry about the boundary.              */
-              }
+            }
+#       elif defined(E2K)
+          /* We also need to push procedure stack store.        */
+          /* Procedure stack grows up.                          */
+          {
+            ptr_t bs_lo;
+            size_t stack_size;
+
+            GET_PROCEDURE_STACK_LOCAL(&bs_lo, &stack_size);
+            GC_push_all_register_sections(bs_lo, bs_lo + stack_size,
+                                          TRUE /* eager */,
+                                          GC_traced_stack_sect);
+            FREE_PROCEDURE_STACK_LOCAL(bs_lo, stack_size);
+          }
 #       endif
 #   endif /* !THREADS */
 }
@@ -834,6 +854,7 @@ GC_INNER void (*GC_push_typed_structures)(void) = 0;
 
 GC_INNER void GC_cond_register_dynamic_libraries(void)
 {
+  GC_ASSERT(I_HOLD_LOCK());
 # if (defined(DYNAMIC_LOADING) && !defined(MSWIN_XBOX1)) \
      || defined(CYGWIN32) || defined(MSWIN32) || defined(MSWINCE) \
      || defined(PCR)
@@ -858,12 +879,13 @@ STATIC void GC_push_regs_and_stack(ptr_t cold_gc_frame)
 /* accessible pointer.  If all is false, arrange to push only possibly  */
 /* altered values.  Cold_gc_frame is an address inside a GC frame that  */
 /* remains valid until all marking is complete; a NULL value indicates  */
-/* that it is OK to miss some register values.  Called with the         */
-/* allocation lock held.                                                */
+/* that it is OK to miss some register values.                          */
 GC_INNER void GC_push_roots(GC_bool all, ptr_t cold_gc_frame GC_ATTR_UNUSED)
 {
     int i;
     unsigned kind;
+
+    GC_ASSERT(I_HOLD_LOCK());
 
     /* Next push static data.  This must happen early on, since it is   */
     /* not robust against mark stack overflow.                          */

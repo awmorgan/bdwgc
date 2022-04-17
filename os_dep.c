@@ -242,13 +242,15 @@ GC_INNER const char * GC_get_maps(void)
             maps_size = 0;
             do {
                 result = GC_repeat_read(f, maps_buf, maps_buf_sz-1);
-                if (result <= 0) {
+                if (result < 0) {
                   ABORT_ARG1("Failed to read /proc/self/maps",
-                             ": errno= %d", result < 0 ? errno : 0);
+                             ": errno= %d", errno);
                 }
                 maps_size += result;
             } while ((size_t)result == maps_buf_sz-1);
             close(f);
+            if (0 == maps_size)
+              ABORT("Empty /proc/self/maps");
 #           ifdef THREADS
               if (maps_size > old_maps_size) {
                 /* This might be caused by e.g. thread creation. */
@@ -285,7 +287,7 @@ GC_INNER const char * GC_get_maps(void)
 /* original buffer.                                                     */
 #if (defined(DYNAMIC_LOADING) && defined(USE_PROC_FOR_LIBRARIES)) \
     || defined(IA64) || defined(INCLUDE_LINUX_THREAD_DESCR) \
-    || defined(REDIRECT_MALLOC)
+    || (defined(REDIRECT_MALLOC) && defined(GC_LINUX_THREADS))
   GC_INNER const char *GC_parse_map_entry(const char *maps_ptr,
                                           ptr_t *start, ptr_t *end,
                                           const char **prot, unsigned *maj_dev,
@@ -363,7 +365,7 @@ GC_INNER const char * GC_get_maps(void)
   }
 #endif /* IA64 || INCLUDE_LINUX_THREAD_DESCR */
 
-#if defined(REDIRECT_MALLOC)
+#if defined(REDIRECT_MALLOC) && defined(GC_LINUX_THREADS)
   /* Find the text(code) mapping for the library whose name, after      */
   /* stripping the directory part, starts with nm.                      */
   GC_INNER GC_bool GC_text_mapping(char *nm, ptr_t *startp, ptr_t *endp)
@@ -401,6 +403,8 @@ GC_INNER const char * GC_get_maps(void)
   static ptr_t backing_store_base_from_proc(void)
   {
     ptr_t my_start, my_end;
+
+    GC_ASSERT(I_HOLD_LOCK());
     if (!GC_enclosing_mapping(GC_save_regs_in_stack(), &my_start, &my_end)) {
         GC_COND_LOG_PRINTF("Failed to find backing store base from /proc\n");
         return 0;
@@ -428,7 +432,11 @@ GC_INNER const char * GC_get_maps(void)
 #   pragma weak data_start
     extern int __data_start[], data_start[];
     EXTERN_C_END
-# endif /* LINUX */
+# elif defined(NETBSD)
+    EXTERN_C_BEGIN
+    extern char **environ;
+    EXTERN_C_END
+# endif
 
   ptr_t GC_data_start = NULL;
 
@@ -465,7 +473,13 @@ GC_INNER const char * GC_get_maps(void)
       return;
     }
 
-    GC_data_start = (ptr_t)GC_find_limit(data_end, FALSE);
+#   ifdef NETBSD
+      /* This may need to be environ, without the underscore, for       */
+      /* some versions.                                                 */
+      GC_data_start = (ptr_t)GC_find_limit(&environ, FALSE);
+#   else
+      GC_data_start = (ptr_t)GC_find_limit(data_end, FALSE);
+#   endif
   }
 #endif /* SEARCH_FOR_DATA_START */
 
@@ -494,21 +508,6 @@ GC_INNER const char * GC_get_maps(void)
   }
 # define sbrk tiny_sbrk
 #endif /* ECOS */
-
-#if defined(NETBSD) && defined(__ELF__)
-  ptr_t GC_data_start = NULL;
-
-  EXTERN_C_BEGIN
-  extern char **environ;
-  EXTERN_C_END
-
-  GC_INNER void GC_init_netbsd_elf(void)
-  {
-        /* This may need to be environ, without the underscore, for     */
-        /* some versions.                                               */
-    GC_data_start = (ptr_t)GC_find_limit(&environ, FALSE);
-  }
-#endif /* NETBSD */
 
 #if defined(ADDRESS_SANITIZER) && (defined(UNIX_LIKE) \
                     || defined(NEED_FIND_LIMIT) || defined(MPROTECT_VDB)) \
@@ -594,10 +593,11 @@ GC_INNER const char * GC_get_maps(void)
     static volatile ptr_t result;
 
     struct sigaction act;
-    word pgsz = (word)sysconf(_SC_PAGESIZE);
+    word pgsz;
 
-    GC_ASSERT((word)bound >= pgsz);
     GC_ASSERT(I_HOLD_LOCK());
+    pgsz = (word)sysconf(_SC_PAGESIZE);
+    GC_ASSERT((word)bound >= pgsz);
 
     act.sa_handler = GC_fault_handler_openbsd;
     sigemptyset(&act.sa_mask);
@@ -1077,6 +1077,7 @@ GC_INNER size_t GC_page_size = 0;
     }
 
     /* old way to get the register stackbottom */
+    GC_ASSERT(GC_stackbottom != NULL);
     return (ptr_t)(((word)GC_stackbottom - BACKING_STORE_DISPLACEMENT - 1)
                    & ~(BACKING_STORE_ALIGNMENT - 1));
   }
@@ -1107,6 +1108,7 @@ GC_INNER size_t GC_page_size = 0;
     {
       ptr_t result;
 
+      GC_ASSERT(I_HOLD_LOCK());
 #     ifdef USE_LIBC_PRIVATES
         if (0 != &__libc_ia64_register_backing_store_base
             && 0 != __libc_ia64_register_backing_store_base) {
@@ -1419,6 +1421,8 @@ GC_INNER size_t GC_page_size = 0;
         RESTORE_CANCEL(cancel_state);
       }
       UNLOCK();
+#   elif defined(E2K)
+      b -> reg_base = NULL;
 #   endif
     return GC_SUCCESS;
   }
@@ -1534,11 +1538,13 @@ GC_INNER size_t GC_page_size = 0;
       DISABLE_CANCEL(cancel_state);  /* May be unnecessary? */
 #     ifdef STACK_GROWS_DOWN
         b -> mem_base = GC_find_limit(GC_approx_sp(), TRUE);
-#       ifdef IA64
-          b -> reg_base = GC_find_limit(GC_save_regs_in_stack(), FALSE);
-#       endif
 #     else
         b -> mem_base = GC_find_limit(GC_approx_sp(), FALSE);
+#     endif
+#     ifdef IA64
+        b -> reg_base = GC_find_limit(GC_save_regs_in_stack(), FALSE);
+#     elif defined(E2K)
+        b -> reg_base = NULL;
 #     endif
       RESTORE_CANCEL(cancel_state);
       UNLOCK();
@@ -1940,6 +1946,7 @@ void GC_register_data_segments(void)
       char * base;
       char * limit;
 
+      GC_ASSERT(I_HOLD_LOCK());
       if (!GC_no_win32_dlls) return;
       p = base = limit = GC_least_described_address(static_root);
       while ((word)p < (word)GC_sysinfo.lpMaximumApplicationAddress) {
@@ -2066,6 +2073,7 @@ void GC_register_data_segments(void)
 {
   ptr_t region_start = DATASTART;
 
+  GC_ASSERT(I_HOLD_LOCK());
   if ((word)region_start - 1U >= (word)DATAEND)
     ABORT_ARG2("Wrong DATASTART/END pair",
                ": %p .. %p", (void *)region_start, (void *)DATAEND);
@@ -2094,6 +2102,7 @@ void GC_register_data_segments(void)
 
   void GC_register_data_segments(void)
   {
+    GC_ASSERT(I_HOLD_LOCK());
 #   if !defined(PCR) && !defined(MACOS)
 #     if defined(REDIRECT_MALLOC) && defined(GC_SOLARIS_THREADS)
         /* As of Solaris 2.3, the Solaris threads implementation        */
@@ -2605,14 +2614,6 @@ STATIC ptr_t GC_unmap_start(ptr_t start, size_t bytes)
     return result;
 }
 
-/* Under Win32/WinCE we commit (map) and decommit (unmap)       */
-/* memory using VirtualAlloc and VirtualFree.  These functions  */
-/* work on individual allocations of virtual memory, made       */
-/* previously using VirtualAlloc with the MEM_RESERVE flag.     */
-/* The ranges we need to (de)commit may span several of these   */
-/* allocations; therefore we use VirtualQuery to check          */
-/* allocation lengths, and split up the range as necessary.     */
-
 /* We assume that GC_remap is called on exactly the same range  */
 /* as a previous call to GC_unmap.  It is safe to consistently  */
 /* round the endpoints in both places.                          */
@@ -2622,6 +2623,13 @@ static void block_unmap_inner(ptr_t start_addr, size_t len)
     if (0 == start_addr) return;
 
 #   ifdef USE_WINALLOC
+      /* Under Win32/WinCE we commit (map) and decommit (unmap)         */
+      /* memory using VirtualAlloc and VirtualFree.  These functions    */
+      /* work on individual allocations of virtual memory, made         */
+      /* previously using VirtualAlloc with the MEM_RESERVE flag.       */
+      /* The ranges we need to (de)commit may span several of these     */
+      /* allocations; therefore we use VirtualQuery to check            */
+      /* allocation lengths, and split up the range as necessary.       */
       while (len != 0) {
           MEMORY_BASIC_INFORMATION mem_info;
           word free_len;
@@ -2636,15 +2644,13 @@ static void block_unmap_inner(ptr_t start_addr, size_t len)
           start_addr += free_len;
           len -= free_len;
       }
-#   elif defined(SN_TARGET_PS3)
-      ps3_free_mem(start_addr, len);
 #   else
-      /* We immediately remap it to prevent an intervening mmap from    */
-      /* accidentally grabbing the same address space.                  */
       if (len != 0) {
-#       if defined(AIX) || defined(CYGWIN32) || defined(HAIKU) \
-           || (defined(LINUX) && !defined(PREFER_MMAP_PROT_NONE)) \
-           || defined(HPUX)
+#       ifdef SN_TARGET_PS3
+          ps3_free_mem(start_addr, len);
+#       elif defined(AIX) || defined(CYGWIN32) || defined(HAIKU) \
+             || (defined(LINUX) && !defined(PREFER_MMAP_PROT_NONE)) \
+             || defined(HPUX)
           /* On AIX, mmap(PROT_NONE) fails with ENOMEM unless the       */
           /* environment variable XPG_SUS_ENV is set to ON.             */
           /* On Cygwin, calling mmap() with the new protection flags on */
@@ -2652,12 +2658,22 @@ static void block_unmap_inner(ptr_t start_addr, size_t len)
           /* However, calling mprotect() on the given address range     */
           /* with PROT_NONE seems to work fine.                         */
           /* On Linux, low RLIMIT_AS value may lead to mmap failure.    */
-          if (mprotect(start_addr, len, PROT_NONE))
-            ABORT_ON_REMAP_FAIL("unmap: mprotect", start_addr, len);
-#       elif defined(EMSCRIPTEN)
-          /* Nothing to do, mmap(PROT_NONE) is not supported and        */
-          /* mprotect() is just a no-op.                                */
+#         if defined(LINUX) && !defined(FORCE_MPROTECT_BEFORE_MADVISE)
+            /* On Linux, at least, madvise() should be sufficient.      */
+#         else
+            if (mprotect(start_addr, len, PROT_NONE))
+              ABORT_ON_REMAP_FAIL("unmap: mprotect", start_addr, len);
+#         endif
+#         if !defined(CYGWIN32)
+            /* On Linux (and some other platforms probably),    */
+            /* mprotect(PROT_NONE) is just disabling access to  */
+            /* the pages but not returning them to OS.          */
+            if (madvise(start_addr, len, MADV_DONTNEED) == -1)
+              ABORT_ON_REMAP_FAIL("unmap: madvise", start_addr, len);
+#         endif
 #       else
+          /* We immediately remap it to prevent an intervening mmap()   */
+          /* from accidentally grabbing the same address space.         */
           void * result = mmap(start_addr, len, PROT_NONE,
                                MAP_PRIVATE | MAP_FIXED | OPT_MAP_ANON,
                                zero_fd, 0/* offset */);
@@ -2717,14 +2733,19 @@ GC_INNER void GC_remap(ptr_t start, size_t bytes)
 #         ifdef LINT2
             GC_noop1((word)result);
 #         endif
+          GC_ASSERT(GC_unmapped_bytes >= alloc_len);
           GC_unmapped_bytes -= alloc_len;
           start_addr += alloc_len;
           len -= alloc_len;
       }
+#     undef IGNORE_PAGES_EXECUTABLE
 #   else
       /* It was already remapped with PROT_NONE. */
       {
-#       if defined(NACL) || defined(NETBSD)
+#       if !defined(SN_TARGET_PS3) && !defined(FORCE_MPROTECT_BEFORE_MADVISE) \
+           && defined(LINUX) && !defined(PREFER_MMAP_PROT_NONE)
+          /* Nothing to unprotect as madvise() is just a hint.  */
+#       elif defined(NACL) || defined(NETBSD)
           /* NaCl does not expose mprotect, but mmap should work fine.  */
           /* In case of NetBSD, mprotect fails (unlike mmap) even       */
           /* without PROT_EXEC if PaX MPROTECT feature is enabled.      */
@@ -2739,13 +2760,15 @@ GC_INNER void GC_remap(ptr_t start, size_t bytes)
 #         if defined(CPPCHECK) || defined(LINT2)
             GC_noop1((word)result);
 #         endif
+#         undef IGNORE_PAGES_EXECUTABLE
 #       else
           if (mprotect(start_addr, len, (PROT_READ | PROT_WRITE)
                             | (GC_pages_executable ? PROT_EXEC : 0)))
             ABORT_ON_REMAP_FAIL("remap: mprotect", start_addr, len);
+#         undef IGNORE_PAGES_EXECUTABLE
 #       endif /* !NACL */
       }
-#     undef IGNORE_PAGES_EXECUTABLE
+      GC_ASSERT(GC_unmapped_bytes >= len);
       GC_unmapped_bytes -= len;
 #   endif
 }
@@ -2965,6 +2988,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
 
     GC_INNER GC_bool GC_gww_dirty_init(void)
     {
+      /* No assumption about the GC lock. */
       detect_GetWriteWatch();
       return GC_GWW_AVAILABLE();
     }
@@ -2973,6 +2997,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
   {
     word i;
 
+    GC_ASSERT(I_HOLD_LOCK());
     if (!output_unneeded)
       BZERO(GC_grungy_pages, sizeof(GC_grungy_pages));
 
@@ -3121,7 +3146,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
 # elif !defined(USE_WINALLOC)
 #   include <sys/mman.h>
 #   include <signal.h>
-#   if !defined(CYGWIN32) && !defined(HAIKU)
+#   if !defined(AIX) && !defined(CYGWIN32) && !defined(HAIKU)
 #     include <sys/syscall.h>
 #   endif
 
@@ -3242,7 +3267,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
 #     define CODE_OK (si -> si_code == 2 /* experimentally determined */)
 #   elif defined(IRIX5)
 #     define CODE_OK (si -> si_code == EACCES)
-#   elif defined(CYGWIN32) || defined(HAIKU) || defined(HURD)
+#   elif defined(AIX) || defined(CYGWIN32) || defined(HAIKU) || defined(HURD)
 #     define CODE_OK TRUE
 #   elif defined(LINUX)
 #     define CODE_OK TRUE
@@ -3326,7 +3351,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
 
             if (old_handler == (SIG_HNDLR_PTR)(signed_word)SIG_DFL) {
 #               if !defined(MSWIN32) && !defined(MSWINCE)
-                    ABORT_ARG1("Unexpected bus error or segmentation fault",
+                    ABORT_ARG1("Unexpected segmentation fault outside heap",
                                " at %p", (void *)addr);
 #               else
                     return(EXCEPTION_CONTINUE_SEARCH);
@@ -3397,11 +3422,14 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
   {
 #   if !defined(MSWIN32) && !defined(MSWINCE)
       struct sigaction act, oldact;
+#   endif
+
+    GC_ASSERT(I_HOLD_LOCK());
+#   if !defined(MSWIN32) && !defined(MSWINCE)
       act.sa_flags = SA_RESTART | SA_SIGINFO;
       act.sa_sigaction = GC_write_fault_handler;
       (void)sigemptyset(&act.sa_mask);
-#     if defined(THREADS) && !defined(GC_OPENBSD_UTHREADS) \
-         && !defined(GC_WIN32_THREADS) && !defined(NACL)
+#     ifdef SIGNAL_BASED_STOP_WORLD
         /* Arrange to postpone the signal while we are in a write fault */
         /* handler.  This effectively makes the handler atomic w.r.t.   */
         /* stopping the world for GC.                                   */
@@ -3660,6 +3688,7 @@ STATIC void GC_protect_heap(void)
 
 GC_INNER GC_bool GC_dirty_init(void)
 {
+    GC_ASSERT(I_HOLD_LOCK());
     if (GC_bytes_allocd != 0 || GC_bytes_allocd_before_gc != 0) {
       memset(GC_written_pages, 0xff, sizeof(page_hash_table));
       GC_VERBOSE_LOG_PRINTF(
@@ -3680,6 +3709,7 @@ GC_INLINE void GC_proc_read_dirty(GC_bool output_unneeded)
     char * bufp = GC_proc_buf;
     int i;
 
+    GC_ASSERT(I_HOLD_LOCK());
 #   ifndef THREADS
       /* If the current pid differs from the saved one, then we are in  */
       /* the forked (child) process, the current /proc file should be   */
@@ -3891,6 +3921,7 @@ GC_INLINE void GC_proc_read_dirty(GC_bool output_unneeded)
     GC_INNER GC_bool GC_dirty_init(void)
 # endif
   {
+    GC_ASSERT(I_HOLD_LOCK());
     GC_ASSERT(NULL == soft_vdb_buf);
 #   ifdef MPROTECT_VDB
       char * str = GETENV("GC_USE_GETWRITEWATCH");
@@ -4041,6 +4072,7 @@ GC_INLINE void GC_proc_read_dirty(GC_bool output_unneeded)
   {
     ssize_t res;
 
+    GC_ASSERT(I_HOLD_LOCK());
 #   ifndef THREADS
       /* Similar as for GC_proc_read_dirty.     */
       if (getpid() != saved_proc_pid
@@ -4144,6 +4176,7 @@ GC_INNER GC_bool GC_dirty_init(void)
   /* lose dirty bits while it's happening (as in GC_enable_incremental).*/
   GC_INNER void GC_read_dirty(GC_bool output_unneeded)
   {
+    GC_ASSERT(I_HOLD_LOCK());
     if (GC_manual_vdb
 #       if defined(MPROTECT_VDB)
           || !GC_GWW_AVAILABLE()
@@ -4636,6 +4669,7 @@ GC_INNER GC_bool GC_dirty_init(void)
   pthread_attr_t attr;
   exception_mask_t mask;
 
+  GC_ASSERT(I_HOLD_LOCK());
 # ifdef CAN_HANDLE_FORK
     if (GC_handle_fork) {
       /* To both support GC incremental mode and GC functions usage in  */

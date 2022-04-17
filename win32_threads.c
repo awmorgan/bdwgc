@@ -822,6 +822,9 @@ GC_API int GC_CALL GC_register_my_thread(const struct GC_stack_base *sb)
   }
 }
 
+#ifdef GC_DISABLE_INCREMENTAL
+# define GC_wait_for_gc_completion(wait_for_all) (void)(wait_for_all)
+#else
 /* Similar to that in pthread_support.c.        */
 STATIC void GC_wait_for_gc_completion(GC_bool wait_for_all)
 {
@@ -845,6 +848,7 @@ STATIC void GC_wait_for_gc_completion(GC_bool wait_for_all)
              && (wait_for_all || old_gc_no == GC_gc_no));
   }
 }
+#endif /* !GC_DISABLE_INCREMENTAL */
 
 GC_API int GC_CALL GC_unregister_my_thread(void)
 {
@@ -1243,7 +1247,7 @@ void GC_push_thread_structures(void)
   /* else */ {
     GC_PUSH_ALL_SYM(GC_threads);
   }
-# if defined(THREAD_LOCAL_ALLOC)
+# if defined(THREAD_LOCAL_ALLOC) && defined(USE_CUSTOM_SPECIFIC)
     GC_PUSH_ALL_SYM(GC_thread_key);
     /* Just in case we ever use our own TLS implementation.     */
 # endif
@@ -3174,8 +3178,8 @@ GC_INNER void GC_thr_init(void)
 
        case DLL_THREAD_DETACH:
         /* We are hopefully running in the context of the exiting thread. */
-        GC_ASSERT(parallel_initialized);
         if (GC_win32_dll_threads) {
+          GC_ASSERT(parallel_initialized);
           GC_delete_thread(GetCurrentThreadId());
         }
         break;

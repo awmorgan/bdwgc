@@ -48,13 +48,22 @@ void GC_noop6(word arg1 GC_ATTR_UNUSED, word arg2 GC_ATTR_UNUSED,
 # endif
 }
 
-volatile word GC_noop_sink;
+#if defined(AO_HAVE_store) && defined(THREAD_SANITIZER)
+  volatile AO_t GC_noop_sink;
+#else
+  volatile word GC_noop_sink;
+#endif
 
-/* Single argument version, robust against whole program analysis. */
-GC_ATTR_NO_SANITIZE_THREAD
+/* Make the argument appear live to compiler.  This is similar  */
+/* to GC_noop6(), but with a single argument.  Robust against   */
+/* whole program analysis.                                      */
 GC_API void GC_CALL GC_noop1(word x)
 {
+# if defined(AO_HAVE_store) && defined(THREAD_SANITIZER)
+    AO_store(&GC_noop_sink, (AO_t)x);
+# else
     GC_noop_sink = x;
+# endif
 }
 
 /* Initialize GC_obj_kinds properly and standard free lists properly.   */
@@ -140,9 +149,14 @@ GC_INNER void GC_set_hdr_marks(hdr *hhdr)
         hhdr -> hb_marks[i] = 1;
       }
 #   else
-      for (i = 0; i < divWORDSZ(n_marks + WORDSZ); ++i) {
+      /* Note that all bits are set even in case of MARK_BIT_PER_GRANULE,   */
+      /* instead of setting every n-th bit where n is MARK_BIT_OFFSET(sz).  */
+      /* This is done for a performance reason.                             */
+      for (i = 0; i < divWORDSZ(n_marks); ++i) {
         hhdr -> hb_marks[i] = GC_WORD_MAX;
       }
+      /* Set the remaining bits near the end (plus one bit past the end).   */
+      hhdr -> hb_marks[i] = ((((word)1 << modWORDSZ(n_marks)) - 1) << 1) | 1;
 #   endif
 #   ifdef MARK_BIT_PER_OBJ
       hhdr -> hb_n_marks = n_marks;
@@ -281,6 +295,7 @@ static void alloc_mark_stack(size_t);
   GC_INNER GC_bool GC_mark_some(ptr_t cold_gc_frame)
 #endif
 {
+    GC_ASSERT(I_HOLD_LOCK());
     switch(GC_mark_state) {
         case MS_NONE:
             break;
@@ -488,7 +503,7 @@ static void alloc_mark_stack(size_t);
 #     if GC_GNUC_PREREQ(4, 7) || GC_CLANG_PREREQ(3, 3)
 #       pragma GCC diagnostic push
         /* Suppress "taking the address of label is non-standard" warning. */
-#       if defined(__clang__) || GC_GNUC_PREREQ(6, 4)
+#       if defined(__clang__) || GC_GNUC_PREREQ(6, 0)
 #         pragma GCC diagnostic ignored "-Wpedantic"
 #       else
           /* GCC before ~4.8 does not accept "-Wpedantic" quietly.  */
@@ -540,7 +555,6 @@ static void alloc_mark_stack(size_t);
     rm_handler:
       GC_reset_fault_handler();
       return ret_val;
-
 #   endif /* !MSWIN32 */
 
 handle_ex:
@@ -712,11 +726,11 @@ GC_INNER mse * GC_mark_from(mse *mark_stack_top, mse *mark_stack,
 #         endif /* ENABLE_TRACE */
           descr &= ~GC_DS_TAGS;
           credit -= WORDS_TO_BYTES(WORDSZ/2); /* guess */
-          while (descr != 0) {
-            if ((descr & SIGNB) != 0) {
-              current = *(word *)current_p;
-              FIXUP_POINTER(current);
-              if (current >= (word)least_ha && current < (word)greatest_ha) {
+          for (; descr != 0; descr <<= 1, current_p += sizeof(word)) {
+            if ((descr & SIGNB) == 0) continue;
+            LOAD_WORD_OR_CONTINUE(current, current_p);
+            FIXUP_POINTER(current);
+            if (current >= (word)least_ha && current < (word)greatest_ha) {
                 PREFETCH((ptr_t)current);
 #               ifdef ENABLE_TRACE
                   if (GC_trace_addr == current_p) {
@@ -727,10 +741,7 @@ GC_INNER mse * GC_mark_from(mse *mark_stack_top, mse *mark_stack,
 #               endif /* ENABLE_TRACE */
                 PUSH_CONTENTS((ptr_t)current, mark_stack_top,
                               mark_stack_limit, current_p);
-              }
             }
-            descr <<= 1;
-            current_p += sizeof(word);
           }
           continue;
         case GC_DS_PROC:
@@ -803,7 +814,7 @@ GC_INNER mse * GC_mark_from(mse *mark_stack_top, mse *mark_stack,
     {
 #     define PREF_DIST 4
 
-#     ifndef SMALL_CONFIG
+#     if !defined(SMALL_CONFIG) && !defined(USE_PTR_HWTAG)
         word deferred;
 
         /* Try to prefetch the next pointer to be examined ASAP.        */
@@ -836,11 +847,11 @@ GC_INNER mse * GC_mark_from(mse *mark_stack_top, mse *mark_stack,
         }
 #     endif
 
-      while ((word)current_p <= (word)limit) {
+      for (; (word)current_p <= (word)limit; current_p += ALIGNMENT) {
         /* Empirically, unrolling this loop doesn't help a lot. */
         /* Since PUSH_CONTENTS expands to a lot of code,        */
         /* we don't.                                            */
-        current = *(word *)current_p;
+        LOAD_WORD_OR_CONTINUE(current, current_p);
         FIXUP_POINTER(current);
         PREFETCH(current_p + PREF_DIST*CACHE_LINE_SIZE);
         if (current >= (word)least_ha && current < (word)greatest_ha) {
@@ -857,10 +868,9 @@ GC_INNER mse * GC_mark_from(mse *mark_stack_top, mse *mark_stack,
           PUSH_CONTENTS((ptr_t)current, mark_stack_top,
                         mark_stack_limit, current_p);
         }
-        current_p += ALIGNMENT;
       }
 
-#     ifndef SMALL_CONFIG
+#     if !defined(SMALL_CONFIG) && !defined(USE_PTR_HWTAG)
         /* We still need to mark the entry we previously prefetched.    */
         /* We already know that it passes the preliminary pointer       */
         /* validity test.                                               */
@@ -1243,23 +1253,29 @@ GC_INNER void GC_help_marker(word my_mark_no)
 /* May silently fail.                                              */
 static void alloc_mark_stack(size_t n)
 {
-    mse * new_stack = (mse *)GC_scratch_alloc(n * sizeof(struct GC_ms_entry));
+#   ifdef GWW_VDB
+      static GC_bool GC_incremental_at_stack_alloc = FALSE;
+
+      GC_bool recycle_old;
+#   endif
+    mse * new_stack;
+
+    GC_ASSERT(I_HOLD_LOCK());
+    new_stack = (mse *)GC_scratch_alloc(n * sizeof(struct GC_ms_entry));
 #   ifdef GWW_VDB
       /* Don't recycle a stack segment obtained with the wrong flags.   */
       /* Win32 GetWriteWatch requires the right kind of memory.         */
-      static GC_bool GC_incremental_at_stack_alloc = FALSE;
-      GC_bool recycle_old = !GC_auto_incremental
-                            || GC_incremental_at_stack_alloc;
-
+      recycle_old = !GC_auto_incremental || GC_incremental_at_stack_alloc;
       GC_incremental_at_stack_alloc = GC_auto_incremental;
-#   else
-#     define recycle_old TRUE
 #   endif
 
     GC_mark_stack_too_small = FALSE;
     if (GC_mark_stack != NULL) {
         if (new_stack != 0) {
-          if (recycle_old) {
+#         ifdef GWW_VDB
+            if (recycle_old)
+#         endif
+          {
             /* Recycle old space.       */
             GC_scratch_recycle_inner(GC_mark_stack,
                         GC_mark_stack_size * sizeof(struct GC_ms_entry));
@@ -1582,8 +1598,9 @@ GC_API void GC_CALL GC_push_all_eager(void *bottom, void *top)
     lim = (word *)(((word)top) & ~(ALIGNMENT-1)) - 1;
     for (current_p = (ptr_t)(((word)bottom + ALIGNMENT-1) & ~(ALIGNMENT-1));
          (word)current_p <= (word)lim; current_p += ALIGNMENT) {
-      REGISTER word q = *(word *)current_p;
+      REGISTER word q;
 
+      LOAD_WORD_OR_CONTINUE(q, current_p);
       GC_PUSH_ONE_STACK(q, current_p);
     }
 #   undef GC_greatest_plausible_heap_addr
@@ -1628,8 +1645,9 @@ GC_INNER void GC_push_all_stack(ptr_t bottom, ptr_t top)
     lim = (word *)(((word)top) & ~(ALIGNMENT-1)) - 1;
     for (current_p = (ptr_t)(((word)bottom + ALIGNMENT-1) & ~(ALIGNMENT-1));
          (word)current_p <= (word)lim; current_p += ALIGNMENT) {
-      REGISTER word q = *(word *)current_p;
+      REGISTER word q;
 
+      LOAD_WORD_OR_CONTINUE(q, current_p);
       GC_PUSH_ONE_HEAP(q, current_p, GC_mark_stack_top);
     }
 #   undef GC_greatest_plausible_heap_addr
@@ -1674,6 +1692,7 @@ GC_INNER void GC_push_all_stack(ptr_t bottom, ptr_t top)
 #ifdef USE_PUSH_MARKED_ACCELERATORS
 /* Push all objects reachable from marked objects in the given block */
 /* containing objects of size 1 granule.                             */
+GC_ATTR_NO_SANITIZE_THREAD
 STATIC void GC_push_marked1(struct hblk *h, hdr *hhdr)
 {
     word * mark_word_addr = &(hhdr->hb_marks[0]);
@@ -1727,6 +1746,7 @@ STATIC void GC_push_marked1(struct hblk *h, hdr *hhdr)
 
 /* Push all objects reachable from marked objects in the given block */
 /* of size 2 (granules) objects.                                     */
+GC_ATTR_NO_SANITIZE_THREAD
 STATIC void GC_push_marked2(struct hblk *h, hdr *hhdr)
 {
     word * mark_word_addr = &(hhdr->hb_marks[0]);
@@ -1778,6 +1798,7 @@ STATIC void GC_push_marked2(struct hblk *h, hdr *hhdr)
 /* of size 4 (granules) objects.                                     */
 /* There is a risk of mark stack overflow here.  But we handle that. */
 /* And only unmarked objects get pushed, so it's not very likely.    */
+GC_ATTR_NO_SANITIZE_THREAD
 STATIC void GC_push_marked4(struct hblk *h, hdr *hhdr)
 {
     word * mark_word_addr = &(hhdr->hb_marks[0]);
@@ -1896,6 +1917,7 @@ STATIC void GC_push_marked(struct hblk *h, hdr *hhdr)
 /* first word.  On the other hand, a reclaimed object is a members of   */
 /* free-lists, and thus contains a word-aligned next-pointer as the     */
 /* first word.                                                          */
+ GC_ATTR_NO_SANITIZE_THREAD
  STATIC void GC_push_unconditionally(struct hblk *h, hdr *hhdr)
  {
     word sz = hhdr -> hb_sz;

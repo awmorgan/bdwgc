@@ -585,6 +585,9 @@ void check_marks_int_list(sexpr x)
  * A tiny list reversal test to check thread creation.
  */
 #ifdef THREADS
+# if defined(GC_ENABLE_SUSPEND_THREAD)
+#   include "gc/javaxfc.h"
+# endif
 
 # ifdef VERY_SMALL_CONFIG
 #   define TINY_REVERSE_UPPER_VALUE 4
@@ -593,12 +596,25 @@ void check_marks_int_list(sexpr x)
 # endif
 
 # if defined(GC_WIN32_THREADS) && !defined(GC_PTHREADS)
-    DWORD  __stdcall tiny_reverse_test(void * arg GC_ATTR_UNUSED)
+    DWORD  __stdcall
 # else
-    void * tiny_reverse_test(void * arg GC_ATTR_UNUSED)
+    void*
 # endif
-{
+  tiny_reverse_test(void *p_resumed)
+  {
     int i;
+
+#   if defined(GC_ENABLE_SUSPEND_THREAD) && !defined(GC_OSF1_THREADS) \
+       && defined(SIGNAL_BASED_STOP_WORLD)
+      if (p_resumed != NULL) {
+        /* Test self-suspend.   */
+        GC_suspend_thread(pthread_self());
+        AO_store_release((volatile AO_t *)p_resumed, (AO_t)TRUE);
+      }
+#   else
+      (void)p_resumed;
+#   endif
+
     for (i = 0; i < 5; ++i) {
       check_ints(reverse(reverse(ints(1, TINY_REVERSE_UPPER_VALUE))),
                  1, TINY_REVERSE_UPPER_VALUE);
@@ -608,43 +624,63 @@ void check_marks_int_list(sexpr x)
       GC_gcollect();
 #   endif
     return 0;
-}
+  }
 
 # if defined(GC_PTHREADS)
-#   if defined(GC_ENABLE_SUSPEND_THREAD)
-#     include "gc/javaxfc.h"
-#   endif
-
     void fork_a_thread(void)
     {
       pthread_t t;
       int code;
+#     ifdef GC_ENABLE_SUSPEND_THREAD
+        static volatile AO_t forked_cnt = 0;
+        volatile AO_t *p_resumed = NULL;
 
-      code = pthread_create(&t, NULL, tiny_reverse_test, 0);
+        if ((AO_fetch_and_add1(&forked_cnt) % 2) == 0) {
+          p_resumed = GC_NEW(AO_t);
+          CHECK_OUT_OF_MEMORY(p_resumed);
+          AO_fetch_and_add1(&collectable_count);
+        }
+#     else
+#      define p_resumed NULL
+#     endif
+      code = pthread_create(&t, NULL, tiny_reverse_test, (void*)p_resumed);
       if (code != 0) {
         GC_printf("Small thread creation failed %d\n", code);
         FAIL;
       }
-#     if defined(GC_ENABLE_SUSPEND_THREAD) && !defined(GC_DARWIN_THREADS) \
-         && !defined(GC_OPENBSD_UTHREADS) && !defined(GC_WIN32_THREADS) \
-         && !defined(NACL) && !defined(GC_OSF1_THREADS)
-        if (GC_is_thread_suspended(t)) {
+#     if defined(GC_ENABLE_SUSPEND_THREAD) && !defined(GC_OSF1_THREADS) \
+         && defined(SIGNAL_BASED_STOP_WORLD)
+        if (GC_is_thread_suspended(t) && NULL == p_resumed) {
           GC_printf("Running thread should be not suspended\n");
           FAIL;
         }
-        /* Thread could be running or already terminated (but not joined). */
-        GC_suspend_thread(t);
+        GC_suspend_thread(t); /* might be already self-suspended */
         if (!GC_is_thread_suspended(t)) {
           GC_printf("Thread expected to be suspended\n");
           FAIL;
         }
         GC_suspend_thread(t); /* should be no-op */
-        GC_resume_thread(t);
+        for (;;) {
+          GC_resume_thread(t);
+          if (NULL == p_resumed || AO_load_acquire(p_resumed))
+            break;
+          GC_collect_a_little();
+        }
         if (GC_is_thread_suspended(t)) {
           GC_printf("Resumed thread should be not suspended\n");
           FAIL;
         }
         GC_resume_thread(t); /* should be no-op */
+        if (NULL == p_resumed)
+          GC_collect_a_little();
+        /* Thread could be running or already terminated (but not joined). */
+        GC_suspend_thread(t);
+        GC_collect_a_little();
+        if (!GC_is_thread_suspended(t)) {
+          GC_printf("Thread expected to be suspended\n");
+          FAIL;
+        }
+        GC_resume_thread(t);
 #     endif
       if ((code = pthread_join(t, 0)) != 0) {
         GC_printf("Small thread join failed, errno= %d\n", code);
@@ -726,7 +762,11 @@ void *GC_CALLBACK reverse_test_inner(void *data)
 #   if defined(MACOS) \
        || (defined(UNIX_LIKE) && defined(NO_GETCONTEXT)) /* e.g. musl */
       /* Assume 128 KB stacks at least. */
-#     define BIG 1000
+#     if defined(__s390x__)
+#       define BIG 600
+#     else
+#       define BIG 1000
+#     endif
 #   elif defined(PCR)
       /* PCR default stack is 100 KB.  Stack frames are up to 120 bytes. */
 #     define BIG 700
@@ -928,9 +968,11 @@ tn * mktree(int n)
     if (AO_fetch_and_add1(&extra_count) % 119 == 0) {
 #       ifndef GC_NO_FINALIZATION
           int my_index;
-          void *new_link;
+          void **new_link = GC_NEW(void *);
 #       endif
 
+        CHECK_OUT_OF_MEMORY(new_link);
+        AO_fetch_and_add1(&collectable_count);
         {
           FINALIZER_LOCK();
                 /* Losing a count here causes erroneous report of failure. */
@@ -960,18 +1002,23 @@ tn * mktree(int n)
                 GC_printf("GC_move_disappearing_link(link,link) failed\n");
                 FAIL;
         }
-        new_link = (void *)live_indicators[my_index];
+        *new_link = (void *)live_indicators[my_index];
         if (GC_move_disappearing_link((void **)(&(live_indicators[my_index])),
-                                      &new_link) != GC_SUCCESS) {
+                                      new_link) != GC_SUCCESS) {
                 GC_printf("GC_move_disappearing_link(new_link) failed\n");
                 FAIL;
         }
-        if (GC_unregister_disappearing_link(&new_link) == 0) {
+        /* Note: if other thread is performing fork at this moment,     */
+        /* then the stack of the current thread is dropped (together    */
+        /* with new_link variable) in the child process, and            */
+        /* GC_dl_hashtbl entry with the link equal to new_link will be  */
+        /* removed when a collection occurs (as expected).              */
+        if (GC_unregister_disappearing_link(new_link) == 0) {
                 GC_printf("GC_unregister_disappearing_link failed\n");
                 FAIL;
         }
         if (GC_move_disappearing_link((void **)(&(live_indicators[my_index])),
-                                      &new_link) != GC_NOT_FOUND) {
+                                      new_link) != GC_NOT_FOUND) {
                 GC_printf("GC_move_disappearing_link(new_link) failed 2\n");
                 FAIL;
         }
@@ -990,18 +1037,18 @@ tn * mktree(int n)
             GC_printf("GC_move_long_link(link,link) failed\n");
             FAIL;
           }
-          new_link = live_long_refs[my_index];
+          *new_link = live_long_refs[my_index];
           if (GC_move_long_link(&live_long_refs[my_index],
-                                &new_link) != GC_SUCCESS) {
+                                new_link) != GC_SUCCESS) {
             GC_printf("GC_move_long_link(new_link) failed\n");
             FAIL;
           }
-          if (GC_unregister_long_link(&new_link) == 0) {
+          if (GC_unregister_long_link(new_link) == 0) {
             GC_printf("GC_unregister_long_link failed\n");
             FAIL;
           }
           if (GC_move_long_link(&live_long_refs[my_index],
-                                &new_link) != GC_NOT_FOUND) {
+                                new_link) != GC_NOT_FOUND) {
             GC_printf("GC_move_long_link(new_link) failed 2\n");
             FAIL;
           }
@@ -1269,11 +1316,11 @@ void typed_test(void)
 #ifdef DBG_HDRS_ALL
 # define set_print_procs() (void)(A.dummy = 17)
 #else
-  int fail_count = 0;
+  volatile AO_t fail_count = 0;
 
   void GC_CALLBACK fail_proc1(void *x GC_ATTR_UNUSED)
   {
-    fail_count++;
+    AO_fetch_and_add1(&fail_count);
   }
 
   void set_print_procs(void)
@@ -1287,7 +1334,7 @@ void typed_test(void)
 # ifdef THREADS
 #   define TEST_FAIL_COUNT(n) 1
 # else
-#   define TEST_FAIL_COUNT(n) (fail_count >= (n))
+#   define TEST_FAIL_COUNT(n) (fail_count >= (AO_t)(n))
 # endif
 #endif /* !DBG_HDRS_ALL */
 
@@ -1400,7 +1447,7 @@ void run_one_test(void)
         GC_printf("GC_is_heap_ptr(&local_var) produced incorrect result\n");
         FAIL;
       }
-      if (GC_is_heap_ptr(&fail_count) || GC_is_heap_ptr(NULL)) {
+      if (GC_is_heap_ptr((void *)&fail_count) || GC_is_heap_ptr(NULL)) {
         GC_printf("GC_is_heap_ptr(&global_var) produced incorrect result\n");
         FAIL;
       }
@@ -1549,7 +1596,7 @@ void run_one_test(void)
           if (print_stats)
             GC_log_printf("Started a child process, pid= %ld\n",
                           (long)child_pid);
-#         ifdef THREADS
+#         if defined(THREADS) && !defined(THREAD_SANITIZER)
 #           ifdef PARALLEL_MARK
               GC_gcollect(); /* no parallel markers */
 #           endif
@@ -1646,6 +1693,7 @@ void run_one_test(void)
 void run_single_threaded_test(void) {
     GC_disable();
     GC_FREE(GC_MALLOC(100));
+    GC_expand_hp(0); /* add a block to heap */
     GC_enable();
 }
 
@@ -1960,7 +2008,7 @@ void enable_incremental_mode(void)
 #else
 # define CRTMEM_CHECK_INIT() (void)0
 # define CRTMEM_DUMP_LEAKS() (void)0
-#endif // !_MSC_VER
+#endif /* !_MSC_VER */
 
 #if ((defined(MSWIN32) && !defined(__MINGW32__)) || defined(MSWINCE)) \
     && !defined(NO_WINMAIN_ENTRY)
@@ -2046,7 +2094,6 @@ void enable_incremental_mode(void)
        UNTESTED(GC_new_proc);
        UNTESTED(GC_clear_roots);
        UNTESTED(GC_exclude_static_roots);
-       UNTESTED(GC_expand_hp);
        UNTESTED(GC_register_describe_type_fn);
        UNTESTED(GC_register_has_static_roots_callback);
 #      ifdef GC_GCJ_SUPPORT
@@ -2067,9 +2114,6 @@ void enable_incremental_mode(void)
          UNTESTED(GC_should_invoke_finalizers);
 #        ifndef JAVA_FINALIZATION_NOT_NEEDED
            UNTESTED(GC_finalize_all);
-#        endif
-#        ifndef NO_DEBUGGING
-           UNTESTED(GC_dump_finalization);
 #        endif
 #        ifndef GC_TOGGLE_REFS_NOT_NEEDED
            UNTESTED(GC_toggleref_add);
