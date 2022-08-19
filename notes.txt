@@ -1,5 +1,5 @@
-./autogen.sh 
-./configure --enable-large-config --enable-static --enable-gc-debug --disable-dependency-tracking
+./autogen.sh
+./configure --enable-large-config --enable-static=yes --enable-shared=no --enable-gc-debug --disable-dependency-tracking
 make | tee make.log
 make check # runs tests
 
