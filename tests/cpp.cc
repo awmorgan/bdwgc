@@ -5,7 +5,7 @@
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -150,7 +150,9 @@ class C: public GC_NS_QUALIFY(gc_cleanup), public A { public:
           GC_gcollect();
         }
         my_assert(nFreed <= nAllocated);
-        my_assert(nFreed >= (nAllocated / 5) * 4 || GC_get_find_leak());
+#       ifndef GC_NO_FINALIZATION
+            my_assert(nFreed >= (nAllocated / 5) * 4 || GC_get_find_leak());
+#       endif
     }
 
     static int nFreed;
@@ -174,7 +176,9 @@ class D: public GC_NS_QUALIFY(gc) { public:
         nFreed++;
         my_assert( (GC_word)self->i == (GC_word)data );}
     static void Test() {
-        my_assert(nFreed >= (nAllocated / 5) * 4 || GC_get_find_leak());
+#       ifndef GC_NO_FINALIZATION
+            my_assert(nFreed >= (nAllocated / 5) * 4 || GC_get_find_leak());
+#       endif
     }
 
     int i;
@@ -213,7 +217,9 @@ class F: public E {public:
     }
 
     static void Test() {
-        my_assert(nFreedF >= (nAllocatedF / 5) * 4 || GC_get_find_leak());
+#       ifndef GC_NO_FINALIZATION
+            my_assert(nFreedF >= (nAllocatedF / 5) * 4 || GC_get_find_leak());
+#       endif
         my_assert(2 * nFreedF == nFreed);
     }
 
@@ -308,7 +314,7 @@ void* Undisguise( GC_word i ) {
     int *x = gc_allocator<int>().allocate(1);
     int *xio;
     xio = gc_allocator_ignore_off_page<int>().allocate(1);
-    (void)xio;
+    GC_reachable_here(xio);
     int **xptr = traceable_allocator<int *>().allocate(1);
     *x = 29;
     if (!xptr) {
@@ -347,7 +353,7 @@ void* Undisguise( GC_word i ) {
             D* d;
             F* f;
             d = ::new (USE_GC, D::CleanUp, (void*)(GC_word)i) D( i );
-            (void)d;
+            GC_reachable_here(d);
             f = new F;
             F** fa = new F*[1];
             fa[0] = f;
@@ -363,7 +369,7 @@ void* Undisguise( GC_word i ) {
         for (i = 0; i < 1000000; i++) {
             A* a;
             a = new (USE_GC) A( i );
-            (void)a;
+            GC_reachable_here(a);
             B* b;
             b = new B( i );
             (void)b;
@@ -372,7 +378,7 @@ void* Undisguise( GC_word i ) {
                 B::Deleting( 1 );
                 GC_CHECKED_DELETE(b);
                 B::Deleting( 0 );}
-#           ifdef FINALIZE_ON_DEMAND
+#           if defined(FINALIZE_ON_DEMAND) && !defined(GC_NO_FINALIZATION)
               GC_invoke_finalizers();
 #           endif
             }
@@ -394,7 +400,7 @@ void* Undisguise( GC_word i ) {
             B::Deleting( 1 );
             GC_CHECKED_DELETE(b);
             B::Deleting( 0 );
-#           ifdef FINALIZE_ON_DEMAND
+#           if defined(FINALIZE_ON_DEMAND) && !defined(GC_NO_FINALIZATION)
                  GC_invoke_finalizers();
 #           endif
             }
@@ -406,7 +412,7 @@ void* Undisguise( GC_word i ) {
         F::Test();}
 
     x = *xptr;
-    my_assert (29 == x[0]);
-    GC_printf( "The test appears to have succeeded.\n" );
-    return( 0 );
+    my_assert(29 == x[0]);
+    GC_printf("The test appears to have succeeded.\n");
+    return 0;
 }

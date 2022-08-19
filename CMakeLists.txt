@@ -3,13 +3,13 @@
 # Copyright (c) 1996 by Silicon Graphics.  All rights reserved.
 # Copyright (c) 1998 by Fergus Henderson.  All rights reserved.
 # Copyright (c) 2000-2010 by Hewlett-Packard Company.  All rights reserved.
-# Copyright (c) 2010-2021 Ivan Maidanski
+# Copyright (c) 2010-2022 Ivan Maidanski
 ##
 # THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
 # OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
 ##
 # Permission is hereby granted to use or copy this program
-# for any purpose,  provided the above notices are retained on all copies.
+# for any purpose, provided the above notices are retained on all copies.
 # Permission to modify the code and to distribute modified code is granted,
 # provided the above notices are retained, and a notice that the code was
 # modified is included with the above copyright notice.
@@ -145,6 +145,7 @@ set(NODIST_SRC)
 set(ATOMIC_OPS_LIBS)
 set(ATOMIC_OPS_LIBS_CMAKE)
 set(THREADDLLIBS_LIST)
+set(NEED_LIB_RT)
 
 set(_HOST ${CMAKE_SYSTEM_PROCESSOR}-unknown-${CMAKE_SYSTEM})
 string(TOLOWER ${_HOST} HOST)
@@ -224,9 +225,13 @@ if (CMAKE_USE_PTHREADS_INIT)
   if (HOST MATCHES .*-.*-hpux11.*)
     message("Only HP/UX 11 POSIX threads are supported.")
     add_definitions("-D_POSIX_C_SOURCE=199506L")
+    set(NEED_LIB_RT ON)
   elseif (HOST MATCHES .*-.*-netbsd.*)
     message("Only on NetBSD 2.0 or later.")
     add_definitions("-D_PTHREADS")
+    set(NEED_LIB_RT ON)
+  elseif (CMAKE_C_COMPILER_ID STREQUAL "SunPro")
+    set(NEED_LIB_RT ON)
   endif()
   if (MSYS)
     # Does not provide process fork functionality.
@@ -254,6 +259,23 @@ elseif (CMAKE_USE_WIN32_THREADS_INIT)
 elseif (CMAKE_HP_PTHREADS_INIT OR CMAKE_USE_SPROC_INIT)
   message(FATAL_ERROR "Unsupported thread package")
 endif()
+
+# Check whether -lrt linker option is needed to use clock_gettime.
+if (NOT NEED_LIB_RT)
+  check_function_exists(clock_gettime HAVE_CLOCK_GETTIME_DIRECTLY)
+  if (NOT HAVE_CLOCK_GETTIME_DIRECTLY)
+    # Use of clock_gettime() probably requires linking with "rt" library.
+    set(NEED_LIB_RT ON)
+  endif()
+endif()
+
+# Locate and use "rt" library if needed (and the library is available).
+if (NEED_LIB_RT)
+  find_library(LIBRT rt)
+  if (LIBRT)
+    set(THREADDLLIBS_LIST ${THREADDLLIBS_LIST} ${LIBRT})
+  endif()
+endif(NEED_LIB_RT)
 
 if (disable_handle_fork)
   add_definitions("-DNO_HANDLE_FORK")
@@ -380,12 +402,16 @@ if (MSVC)
   set(SRC ${SRC} extra/msvc_dbg.c)
 endif()
 
+# Instruct check_c_source_compiles to skip linking.
+# Alternatively, we could set CMAKE_REQUIRED_LIBRARIES properly.
+SET(CMAKE_REQUIRED_FLAGS "-c")
+
 # Instruct check_c_source_compiles and similar CMake checks not to ignore
 # compiler warnings (like "implicit declaration of function").
 if (NOT BORLAND AND NOT MSVC AND NOT WATCOM)
   check_c_compiler_flag(-Werror HAVE_FLAG_WERROR)
   if (HAVE_FLAG_WERROR)
-    SET(CMAKE_REQUIRED_FLAGS "-Werror")
+    SET(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -Werror")
   endif(HAVE_FLAG_WERROR)
 endif()
 
@@ -491,10 +517,8 @@ if (HAVE_DLADDR)
 endif()
 
 add_library(gc ${SRC})
-if (enable_threads)
-  target_link_libraries(gc
+target_link_libraries(gc
                 PRIVATE ${ATOMIC_OPS_LIBS_CMAKE} ${THREADDLLIBS_LIST})
-endif()
 target_include_directories(gc INTERFACE
         "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
         "$<INSTALL_INTERFACE:include>")

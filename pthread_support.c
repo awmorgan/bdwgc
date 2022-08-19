@@ -3,13 +3,13 @@
  * Copyright (c) 1996 by Silicon Graphics.  All rights reserved.
  * Copyright (c) 1998 by Fergus Henderson.  All rights reserved.
  * Copyright (c) 2000-2005 by Hewlett-Packard Company.  All rights reserved.
- * Copyright (c) 2008-2021 Ivan Maidanski
+ * Copyright (c) 2008-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -216,15 +216,15 @@
   {
     void *dl_handle;
 
-    if (GC_syms_initialized) return;
+    GC_ASSERT(!GC_syms_initialized);
 #   ifdef RTLD_NEXT
       dl_handle = RTLD_NEXT;
 #   else
       dl_handle = dlopen("libpthread.so.0", RTLD_LAZY);
       if (NULL == dl_handle) {
         dl_handle = dlopen("libpthread.so", RTLD_LAZY); /* without ".0" */
+        if (NULL == dl_handle) ABORT("Couldn't open libpthread");
       }
-      if (NULL == dl_handle) ABORT("Couldn't open libpthread");
 #   endif
     REAL_FUNC(pthread_create) = (GC_pthread_create_t)(word)
                                 dlsym(dl_handle, "pthread_create");
@@ -254,13 +254,9 @@
 
 # define INIT_REAL_SYMS() if (EXPECT(GC_syms_initialized, TRUE)) {} \
                             else GC_init_real_syms()
-# define ASSERT_SYMS_INITIALIZED() GC_ASSERT(GC_syms_initialized)
 #else
 # define INIT_REAL_SYMS() (void)0
-# define ASSERT_SYMS_INITIALIZED() GC_ASSERT(parallel_initialized)
 #endif
-
-static GC_bool parallel_initialized = FALSE;
 
 #ifndef GC_ALWAYS_MULTITHREADED
   GC_INNER GC_bool GC_need_to_lock = FALSE;
@@ -348,7 +344,7 @@ STATIC int GC_nprocs = 1;
   {
     int err = pthread_setname_np(pthread_self(), "GC-marker-%zu",
                                  (void*)(size_t)id);
-    if (err != 0)
+    if (EXPECT(err != 0, FALSE))
       WARN("pthread_setname_np failed, errno= %" WARN_PRIdPTR "\n", err);
   }
 #elif defined(HAVE_PTHREAD_SETNAME_NP_WITH_TID) \
@@ -369,7 +365,7 @@ STATIC int GC_nprocs = 1;
 #   ifdef HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID /* iOS, OS X */
       (void)pthread_setname_np(name_buf);
 #   else /* Linux, Solaris, etc. */
-      if (pthread_setname_np(pthread_self(), name_buf) != 0)
+      if (EXPECT(pthread_setname_np(pthread_self(), name_buf) != 0, FALSE))
         WARN("pthread_setname_np failed\n", 0);
 #   endif
   }
@@ -440,14 +436,16 @@ STATIC pthread_t GC_mark_threads[MAX_MARKERS];
   static pthread_mutex_t mark_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
+static int available_markers_m1 = 0;
+
 #ifdef CAN_HANDLE_FORK
-  static int available_markers_m1 = 0;
   static pthread_cond_t mark_cv;
                         /* initialized by GC_start_mark_threads_inner   */
 #else
-# define available_markers_m1 GC_markers_m1
   static pthread_cond_t mark_cv = PTHREAD_COND_INITIALIZER;
 #endif
+
+STATIC void GC_wait_for_gc_completion(GC_bool wait_for_all);
 
 GC_INNER void GC_start_mark_threads_inner(void)
 {
@@ -457,12 +455,13 @@ GC_INNER void GC_start_mark_threads_inner(void)
       sigset_t set, oldset;
 #   endif
 
-    GC_ASSERT(I_DONT_HOLD_LOCK());
-    if (available_markers_m1 <= 0) return;
+    GC_ASSERT(I_HOLD_LOCK());
+    ASSERT_CANCEL_DISABLED();
+    if (available_markers_m1 <= 0 || GC_parallel) return;
                 /* Skip if parallel markers disabled or already started. */
-#   ifdef CAN_HANDLE_FORK
-      if (GC_parallel) return;
+    GC_wait_for_gc_completion(TRUE);
 
+#   ifdef CAN_HANDLE_FORK
       /* Initialize mark_cv (for the first time), or cleanup its value  */
       /* after forking in the child process.  All the marker threads in */
       /* the parent process were blocked on this variable at fork, so   */
@@ -520,10 +519,9 @@ GC_INNER void GC_start_mark_threads_inner(void)
       }
 #   endif /* !NO_MARKER_SPECIAL_SIGMASK */
 
-#   ifdef CAN_HANDLE_FORK
-      /* To have proper GC_parallel value in GC_help_marker.    */
-      GC_markers_m1 = available_markers_m1;
-#   endif
+    /* To have proper GC_parallel value in GC_help_marker.      */
+    GC_markers_m1 = available_markers_m1;
+
     for (i = 0; i < available_markers_m1; ++i) {
       if (0 != REAL_FUNC(pthread_create)(GC_mark_threads + i, &attr,
                               GC_mark_thread, (void *)(word)i)) {
@@ -549,7 +547,9 @@ GC_INNER void GC_start_mark_threads_inner(void)
 
 #endif /* PARALLEL_MARK */
 
-GC_INNER GC_bool GC_thr_initialized = FALSE;
+#ifdef GC_ASSERTIONS
+  GC_INNER GC_bool GC_thr_initialized = FALSE;
+#endif
 
 GC_INNER volatile GC_thread GC_threads[THREAD_TABLE_SZ] = {0};
 
@@ -589,13 +589,13 @@ void GC_push_thread_structures(void)
 #endif /* DEBUG_THREADS */
 
 /* Add a thread to GC_threads.  We assume it wasn't already there.      */
-/* Caller holds allocation lock.                                        */
 STATIC GC_thread GC_new_thread(pthread_t id)
 {
     int hv = THREAD_TABLE_INDEX(id);
     GC_thread result;
     static GC_bool first_thread_used = FALSE;
 
+    GC_ASSERT(I_HOLD_LOCK());
 #   ifdef DEBUG_THREADS
         GC_log_printf("Creating thread %p\n", (void *)id);
         for (result = GC_threads[hv]; result != NULL; result = result->next)
@@ -604,8 +604,7 @@ STATIC GC_thread GC_new_thread(pthread_t id)
             break;
           }
 #   endif
-    GC_ASSERT(I_HOLD_LOCK());
-    if (!EXPECT(first_thread_used, TRUE)) {
+    if (EXPECT(!first_thread_used, FALSE)) {
         result = &first_thread;
         first_thread_used = TRUE;
         GC_ASSERT(NULL == GC_threads[hv]);
@@ -615,7 +614,7 @@ STATIC GC_thread GC_new_thread(pthread_t id)
     } else {
         result = (struct GC_Thread_Rep *)
                  GC_INTERNAL_MALLOC(sizeof(struct GC_Thread_Rep), NORMAL);
-        if (result == 0) return(0);
+        if (EXPECT(NULL == result, FALSE)) return NULL;
     }
     result -> id = id;
 #   ifdef USE_TKILL_ON_ANDROID
@@ -630,7 +629,7 @@ STATIC GC_thread GC_new_thread(pthread_t id)
     GC_ASSERT(0 == result -> flags);
     if (EXPECT(result != &first_thread, TRUE))
       GC_dirty(result);
-    return(result);
+    return result;
 }
 
 /* Delete a thread from GC_threads.  We assume it is there.     */
@@ -664,7 +663,7 @@ STATIC void GC_delete_thread(pthread_t id)
         prev -> next = p -> next;
         GC_dirty(prev);
     }
-    if (p != &first_thread) {
+    if (EXPECT(p != &first_thread, TRUE)) {
 #     ifdef GC_DARWIN_THREADS
         mach_port_deallocate(mach_task_self(), p->stop_info.mach_thread);
 #     endif
@@ -708,44 +707,53 @@ STATIC void GC_delete_gc_thread(GC_thread t)
 
 /* Return a GC_thread corresponding to a given pthread_t.       */
 /* Returns 0 if it's not there.                                 */
-/* Caller holds allocation lock or otherwise inhibits           */
-/* updates.                                                     */
+/* Caller holds allocation lock or otherwise inhibits updates.  */
 /* If there is more than one thread with the given id we        */
 /* return the most recent one.                                  */
 GC_INNER GC_thread GC_lookup_thread(pthread_t id)
 {
     GC_thread p = GC_threads[THREAD_TABLE_INDEX(id)];
 
-    while (p != 0 && !THREAD_EQUAL(p -> id, id)) p = p -> next;
-    return(p);
+    while (p != NULL && !THREAD_EQUAL(p -> id, id))
+        p = p -> next;
+    return p;
 }
 
-/* Called by GC_finalize() (in case of an allocation failure observed). */
-GC_INNER void GC_reset_finalizer_nested(void)
-{
-  GC_thread me = GC_lookup_thread(pthread_self());
-  me->finalizer_nested = 0;
-}
+#ifndef GC_NO_FINALIZATION
+  /* Called by GC_finalize() (in case of an allocation failure observed). */
+  GC_INNER void GC_reset_finalizer_nested(void)
+  {
+    GC_thread me;
 
-/* Checks and updates the thread-local level of finalizers recursion.   */
-/* Returns NULL if GC_invoke_finalizers() should not be called by the   */
-/* collector (to minimize the risk of a deep finalizers recursion),     */
-/* otherwise returns a pointer to the thread-local finalizer_nested.    */
-/* Called by GC_notify_or_invoke_finalizers() only (the lock is held).  */
-GC_INNER unsigned char *GC_check_finalizer_nested(void)
-{
-  GC_thread me = GC_lookup_thread(pthread_self());
-  unsigned nesting_level = me->finalizer_nested;
-  if (nesting_level) {
-    /* We are inside another GC_invoke_finalizers().            */
-    /* Skip some implicitly-called GC_invoke_finalizers()       */
-    /* depending on the nesting (recursion) level.              */
-    if (++me->finalizer_skipped < (1U << nesting_level)) return NULL;
-    me->finalizer_skipped = 0;
+    GC_ASSERT(I_HOLD_LOCK());
+    me = GC_lookup_thread(pthread_self());
+    me->finalizer_nested = 0;
   }
-  me->finalizer_nested = (unsigned char)(nesting_level + 1);
-  return &me->finalizer_nested;
-}
+
+  /* Checks and updates the thread-local level of finalizers recursion. */
+  /* Returns NULL if GC_invoke_finalizers() should not be called by the */
+  /* collector (to minimize the risk of a deep finalizers recursion),   */
+  /* otherwise returns a pointer to the thread-local finalizer_nested.  */
+  /* Called by GC_notify_or_invoke_finalizers() only.                   */
+  GC_INNER unsigned char *GC_check_finalizer_nested(void)
+  {
+    GC_thread me;
+    unsigned nesting_level;
+
+    GC_ASSERT(I_HOLD_LOCK());
+    me = GC_lookup_thread(pthread_self());
+    nesting_level = me->finalizer_nested;
+    if (nesting_level) {
+      /* We are inside another GC_invoke_finalizers().          */
+      /* Skip some implicitly-called GC_invoke_finalizers()     */
+      /* depending on the nesting (recursion) level.            */
+      if (++me->finalizer_skipped < (1U << nesting_level)) return NULL;
+      me->finalizer_skipped = 0;
+    }
+    me->finalizer_nested = (unsigned char)(nesting_level + 1);
+    return &me->finalizer_nested;
+  }
+#endif /* !GC_NO_FINALIZATION */
 
 #if defined(GC_ASSERTIONS) && defined(THREAD_LOCAL_ALLOC)
   /* This is called from thread-local GC_malloc(). */
@@ -788,7 +796,7 @@ GC_API void GC_CALL GC_register_altstack(void *stack, GC_word stack_size,
 
   LOCK();
   me = GC_lookup_thread(self);
-  if (me != NULL) {
+  if (EXPECT(me != NULL, TRUE)) {
     me->stack = (ptr_t)stack;
     me->stack_size = stack_size;
     me->altstack = (ptr_t)altstack;
@@ -1031,13 +1039,14 @@ STATIC void GC_remove_all_threads_but_me(void)
 
     status = dg_sys_info((long int *) &pm_sysinfo,
         DG_SYS_INFO_PM_INFO_TYPE, DG_SYS_INFO_PM_CURRENT_VERSION);
-    if (status < 0)
+    if (status < 0) {
        /* set -1 for error */
        numCpus = -1;
-    else
+    } else {
       /* Active CPUs */
       numCpus = pm_sysinfo.idle_vp_count;
-    return(numCpus);
+    }
+    return numCpus;
   }
 
 #elif defined(GC_DARWIN_THREADS) || defined(GC_FREEBSD_THREADS) \
@@ -1227,7 +1236,7 @@ static void fork_parent_proc(void)
 static void fork_child_proc(void)
 {
     GC_release_dirty_lock();
-#   if defined(PARALLEL_MARK)
+#   ifdef PARALLEL_MARK
       if (GC_parallel) {
 #       if defined(THREAD_SANITIZER) && defined(GC_ASSERTIONS) \
            && defined(CAN_CALL_ATFORK)
@@ -1235,15 +1244,17 @@ static void fork_child_proc(void)
 #       else
           GC_release_mark_lock();
 #       endif
+        /* Turn off parallel marking in the child, since we are probably  */
+        /* just going to exec, and we would have to restart mark threads. */
+        GC_parallel = FALSE;
       }
+#     ifdef THREAD_SANITIZER
+        /* TSan does not support threads creation in the child process. */
+        available_markers_m1 = 0;
+#     endif
 #   endif
     /* Clean up the thread table, so that just our thread is left.      */
     GC_remove_all_threads_but_me();
-#   ifdef PARALLEL_MARK
-      /* Turn off parallel marking in the child, since we are probably  */
-      /* just going to exec, and we would have to restart mark threads. */
-        GC_parallel = FALSE;
-#   endif
 #   ifndef GC_DISABLE_INCREMENTAL
       GC_dirty_update_child();
 #   endif
@@ -1308,22 +1319,21 @@ static void fork_child_proc(void)
   static unsigned required_markers_cnt = 0;
                         /* The default value (0) means the number of    */
                         /* markers should be selected automatically.    */
-#endif /* PARALLEL_MARK */
 
-GC_API void GC_CALL GC_set_markers_count(unsigned markers GC_ATTR_UNUSED)
-{
-# ifdef PARALLEL_MARK
+  GC_API void GC_CALL GC_set_markers_count(unsigned markers)
+  {
     required_markers_cnt = markers < MAX_MARKERS ? markers : MAX_MARKERS;
-# endif
-}
+  }
+#endif /* PARALLEL_MARK */
 
 GC_INNER void GC_thr_init(void)
 {
   GC_ASSERT(I_HOLD_LOCK());
-  if (GC_thr_initialized) return;
-  GC_thr_initialized = TRUE;
-
+  GC_ASSERT(!GC_thr_initialized);
   GC_ASSERT((word)&GC_threads % sizeof(word) == 0);
+# ifdef GC_ASSERTIONS
+    GC_thr_initialized = TRUE;
+# endif
 # ifdef CAN_HANDLE_FORK
     /* Prepare for forks if requested.  */
     if (GC_handle_fork) {
@@ -1475,25 +1485,19 @@ GC_INNER void GC_thr_init(void)
 # endif
 }
 
-/* Perform all initializations, including those that    */
-/* may require allocation.                              */
-/* Called without allocation lock.                      */
+/* Initialize thread local free lists if used.          */
+/* May perform allocations itself.                      */
 /* Must be called before a second thread is created.    */
-/* Did we say it's called without the allocation lock?  */
 GC_INNER void GC_init_parallel(void)
 {
-#   if defined(THREAD_LOCAL_ALLOC)
+#   ifdef THREAD_LOCAL_ALLOC
+      GC_thread me;
       DCL_LOCK_STATE;
-#   endif
-    if (parallel_initialized) return;
-    parallel_initialized = TRUE;
 
-    /* GC_init() calls us back, so set flag first.      */
-    if (!GC_is_initialized) GC_init();
-    /* Initialize thread local free lists if used.      */
-#   if defined(THREAD_LOCAL_ALLOC)
+      GC_ASSERT(GC_is_initialized);
       LOCK();
-      GC_init_thread_local(&(GC_lookup_thread(pthread_self())->tlfs));
+      me = GC_lookup_thread(pthread_self());
+      GC_init_thread_local(&me->tlfs);
       UNLOCK();
 #   endif
 }
@@ -1505,7 +1509,8 @@ GC_INNER void GC_init_parallel(void)
     sigset_t fudged_set;
 
     INIT_REAL_SYMS();
-    if (set != NULL && (how == SIG_BLOCK || how == SIG_SETMASK)) {
+    if (EXPECT(set != NULL, TRUE)
+          && (how == SIG_BLOCK || how == SIG_SETMASK)) {
         int sig_suspend = GC_get_suspend_signal();
 
         fudged_set = *set;
@@ -1514,7 +1519,7 @@ GC_INNER void GC_init_parallel(void)
             ABORT("sigdelset failed");
         set = &fudged_set;
     }
-    return(REAL_FUNC(pthread_sigmask)(how, set, oset));
+    return REAL_FUNC(pthread_sigmask)(how, set, oset);
   }
 #endif /* !GC_NO_PTHREAD_SIGMASK */
 
@@ -1592,6 +1597,21 @@ GC_INNER void GC_do_blocking_inner(ptr_t data, void * context GC_ATTR_UNUSED)
     d -> client_data = (d -> fn)(d -> client_data);
 
     LOCK();   /* This will block if the world is stopped.       */
+#   ifdef LINT2
+      {
+#        ifdef GC_ASSERTIONS
+           GC_thread saved_me = me;
+#        endif
+
+         /* The pointer to the GC thread descriptor should not be   */
+         /* changed while the thread is registered but a static     */
+         /* analysis tool might complain that this pointer value    */
+         /* (obtained in the first locked section) is unreliable in */
+         /* the second locked section.                              */
+         me = GC_lookup_thread(pthread_self());
+         GC_ASSERT(me == saved_me);
+      }
+#   endif
 #   if defined(GC_ENABLE_SUSPEND_THREAD) && defined(SIGNAL_BASED_STOP_WORLD)
       /* Note: this code cannot be moved into do_blocking_leave()   */
       /* otherwise there could be a static analysis tool warning    */
@@ -1616,16 +1636,18 @@ GC_INNER void GC_do_blocking_inner(ptr_t data, void * context GC_ATTR_UNUSED)
                                         void * context GC_ATTR_UNUSED)
   {
     GC_thread me = (GC_thread)thread_me;
-    GC_bool topOfStackUnset = do_blocking_enter(me);
+    GC_bool topOfStackUnset;
     DCL_LOCK_STATE;
 
-    do {
+    GC_ASSERT(I_HOLD_LOCK());
+    topOfStackUnset = do_blocking_enter(me);
+    while ((me -> stop_info.ext_suspend_cnt & 1) != 0) {
       word suspend_cnt = (word)(me -> stop_info.ext_suspend_cnt);
 
       UNLOCK();
       GC_suspend_self_inner(me, suspend_cnt);
       LOCK();
-    } while ((me -> stop_info.ext_suspend_cnt & 1) != 0);
+    }
     do_blocking_leave(me, topOfStackUnset);
   }
 #endif
@@ -1869,7 +1891,7 @@ GC_INNER_PTHRSTART void GC_thread_exit_proc(void *arg)
     GC_thread t;
     DCL_LOCK_STATE;
 
-    ASSERT_SYMS_INITIALIZED();
+    INIT_REAL_SYMS();
     LOCK();
     t = (GC_thread)COVERT_DATAFLOW(GC_lookup_thread(thread));
     /* This is guaranteed to be the intended one, since the thread id   */
@@ -1887,7 +1909,7 @@ GC_INNER_PTHRSTART void GC_thread_exit_proc(void *arg)
        spurious return value properly conditionalized on GC_FREEBSD_THREADS. */
     if (result == EINTR) result = 0;
 # endif
-    if (result == 0) {
+    if (EXPECT(0 == result, TRUE)) {
         LOCK();
         /* Here the pthread thread id may have been recycled.           */
         /* Delete the thread from GC_threads (unless it has been        */
@@ -1905,12 +1927,12 @@ GC_INNER_PTHRSTART void GC_thread_exit_proc(void *arg)
     GC_thread t;
     DCL_LOCK_STATE;
 
-    ASSERT_SYMS_INITIALIZED();
+    INIT_REAL_SYMS();
     LOCK();
     t = (GC_thread)COVERT_DATAFLOW(GC_lookup_thread(thread));
     UNLOCK();
     result = REAL_FUNC(pthread_detach)(thread);
-    if (result == 0) {
+    if (EXPECT(0 == result, TRUE)) {
       LOCK();
       t -> flags |= DETACHED;
       /* Here the pthread thread id may have been recycled. */
@@ -2020,9 +2042,17 @@ STATIC GC_thread GC_register_my_thread_inner(const struct GC_stack_base *sb,
 
 GC_API void GC_CALL GC_allow_register_threads(void)
 {
+# ifdef GC_ASSERTIONS
+    DCL_LOCK_STATE;
+
     /* Check GC is initialized and the current thread is registered. */
+    LOCK(); /* just to match that in win32_threads.c */
     GC_ASSERT(GC_lookup_thread(pthread_self()) != 0);
-    set_need_to_lock();
+    UNLOCK();
+# endif
+  INIT_REAL_SYMS(); /* to initialize symbols while single-threaded */
+  GC_start_mark_threads();
+  set_need_to_lock();
 }
 
 GC_API int GC_CALL GC_register_my_thread(const struct GC_stack_base *sb)
@@ -2036,7 +2066,7 @@ GC_API int GC_CALL GC_register_my_thread(const struct GC_stack_base *sb)
 
     LOCK();
     me = GC_lookup_thread(self);
-    if (0 == me) {
+    if (EXPECT(NULL == me, TRUE)) {
         me = GC_register_my_thread_inner(sb, self);
 #       if defined(CPPCHECK)
           GC_noop1(me->flags);
@@ -2044,11 +2074,9 @@ GC_API int GC_CALL GC_register_my_thread(const struct GC_stack_base *sb)
         me -> flags |= DETACHED;
           /* Treat as detached, since we do not need to worry about     */
           /* pointer results.                                           */
-#       if defined(THREAD_LOCAL_ALLOC)
-          GC_init_thread_local(&(me->tlfs));
+#       ifdef THREAD_LOCAL_ALLOC
+          GC_init_thread_local(&me->tlfs);
 #       endif
-        UNLOCK();
-        return GC_SUCCESS;
     } else if ((me -> flags & FINISHED) != 0) {
         /* This code is executed when a thread is registered from the   */
         /* client thread key destructor.                                */
@@ -2064,8 +2092,8 @@ GC_API int GC_CALL GC_register_my_thread(const struct GC_stack_base *sb)
           /* our signals might be blocked.                              */
           GC_unblock_gc_signals();
 #       endif
-#       if defined(THREAD_LOCAL_ALLOC)
-          GC_init_thread_local(&(me->tlfs));
+#       ifdef THREAD_LOCAL_ALLOC
+          GC_init_thread_local(&me->tlfs);
 #       endif
 #       if defined(GC_ENABLE_SUSPEND_THREAD) \
            && defined(SIGNAL_BASED_STOP_WORLD)
@@ -2073,12 +2101,12 @@ GC_API int GC_CALL GC_register_my_thread(const struct GC_stack_base *sb)
             GC_with_callee_saves_pushed(GC_suspend_self_blocked, (ptr_t)me);
           }
 #       endif
-        UNLOCK();
-        return GC_SUCCESS;
     } else {
         UNLOCK();
         return GC_DUPLICATE;
     }
+    UNLOCK();
+    return GC_SUCCESS;
 }
 
 struct start_info {
@@ -2109,8 +2137,8 @@ GC_INNER_PTHRSTART GC_thread GC_start_rtn_prepare_thread(
     LOCK();
     me = GC_register_my_thread_inner(sb, self);
     me -> flags = si -> flags;
-#   if defined(THREAD_LOCAL_ALLOC)
-      GC_init_thread_local(&(me->tlfs));
+#   ifdef THREAD_LOCAL_ALLOC
+      GC_init_thread_local(&me->tlfs);
 #   endif
     UNLOCK();
     *pstart = si -> start_routine;
@@ -2155,7 +2183,6 @@ GC_INNER_PTHRSTART GC_thread GC_start_rtn_prepare_thread(
     int detachstate;
     word my_flags = 0;
     struct start_info si;
-    DCL_LOCK_STATE;
         /* This is otherwise saved only in an area mmapped by the thread */
         /* library, which isn't visible to the collector.                */
 
@@ -2163,17 +2190,15 @@ GC_INNER_PTHRSTART GC_thread GC_start_rtn_prepare_thread(
     /* even if the default is unreasonably small.  That's the client's  */
     /* responsibility.                                                  */
 
+    GC_ASSERT(I_DONT_HOLD_LOCK());
     INIT_REAL_SYMS();
-    if (!EXPECT(parallel_initialized, TRUE))
-      GC_init_parallel();
+    if (!EXPECT(GC_is_initialized, TRUE)) GC_init();
+    GC_ASSERT(GC_thr_initialized);
     if (sem_init(&si.registered, GC_SEM_INIT_PSHARED, 0) != 0)
       ABORT("sem_init failed");
 
     si.start_routine = start_routine;
     si.arg = arg;
-    LOCK();
-    if (!EXPECT(GC_thr_initialized, TRUE))
-      GC_thr_init();
 #   ifdef GC_ASSERTIONS
       {
         size_t stack_size = 0;
@@ -2192,7 +2217,7 @@ GC_INNER_PTHRSTART GC_thread GC_start_rtn_prepare_thread(
         }
         /* On Solaris 10, with default attr initialization,     */
         /* stack_size remains 0.  Fudge it.                     */
-        if (0 == stack_size) {
+        if (EXPECT(0 == stack_size, FALSE)) {
 #           ifndef SOLARIS
               WARN("Failed to get stack size for assertion checking\n", 0);
 #           endif
@@ -2211,10 +2236,13 @@ GC_INNER_PTHRSTART GC_thread GC_start_rtn_prepare_thread(
     }
     if (PTHREAD_CREATE_DETACHED == detachstate) my_flags |= DETACHED;
     si.flags = my_flags;
-    UNLOCK();
 #   ifdef DEBUG_THREADS
       GC_log_printf("About to start new thread from thread %p\n",
                     (void *)pthread_self());
+#   endif
+#   ifdef PARALLEL_MARK
+      if (EXPECT(!GC_parallel && available_markers_m1 > 0, FALSE))
+        GC_start_mark_threads();
 #   endif
     set_need_to_lock();
     result = REAL_FUNC(pthread_create)(new_thread, attr, GC_start_routine,
@@ -2223,7 +2251,7 @@ GC_INNER_PTHRSTART GC_thread GC_start_rtn_prepare_thread(
     /* Wait until child has been added to the thread table.             */
     /* This also ensures that we hold onto the stack-allocated si until */
     /* the child is done with it.                                       */
-    if (0 == result) {
+    if (EXPECT(0 == result, TRUE)) {
         IF_CANCEL(int cancel_state;)
 
 #       ifdef DEBUG_THREADS
@@ -2242,7 +2270,7 @@ GC_INNER_PTHRSTART GC_thread GC_start_rtn_prepare_thread(
         RESTORE_CANCEL(cancel_state);
     }
     sem_destroy(&si.registered);
-    return(result);
+    return result;
   }
 #endif /* !SN_TARGET_ORBIS && !SN_TARGET_PSP2 */
 
@@ -2308,7 +2336,7 @@ STATIC void GC_generic_lock(pthread_mutex_t * lock)
     unsigned pause_length = 1;
     unsigned i;
 
-    if (0 == pthread_mutex_trylock(lock)) {
+    if (EXPECT(0 == pthread_mutex_trylock(lock), TRUE)) {
 #       ifdef LOCK_STATS
             (void)AO_fetch_and_add1(&GC_unlocked_count);
 #       endif
@@ -2373,7 +2401,8 @@ GC_INNER void GC_lock(void)
     unsigned my_last_spins;
     unsigned i;
 
-    if (AO_test_and_set_acquire(&GC_allocate_lock) == AO_TS_CLEAR) {
+    if (EXPECT(AO_test_and_set_acquire(&GC_allocate_lock)
+                == AO_TS_CLEAR, TRUE)) {
         return;
     }
     my_spin_max = (unsigned)AO_load(&spin_max);

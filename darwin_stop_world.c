@@ -4,12 +4,13 @@
  * Copyright (c) 1998 by Fergus Henderson.  All rights reserved.
  * Copyright (c) 2000-2010 by Hewlett-Packard Development Company.
  * All rights reserved.
+ * Copyright (c) 2008-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -126,7 +127,7 @@ GC_API void GC_CALL GC_use_threads_discovery(void)
 #   ifndef GC_DISCOVER_TASK_THREADS
       GC_query_task_threads = TRUE;
 #   endif
-    GC_init_parallel(); /* just to be consistent with Win32 one */
+    GC_init();
 # endif
 }
 
@@ -352,8 +353,9 @@ GC_INNER void GC_push_all_stacks(void)
   int nthreads = 0;
   word total_size = 0;
   mach_msg_type_number_t listcount = (mach_msg_type_number_t)THREAD_TABLE_SZ;
-  if (!EXPECT(GC_thr_initialized, TRUE))
-    GC_thr_init();
+
+  GC_ASSERT(I_HOLD_LOCK());
+  GC_ASSERT(GC_thr_initialized);
 
 # ifndef DARWIN_DONT_PARSE_STACK
     if (GC_query_task_threads) {
@@ -539,13 +541,14 @@ STATIC GC_bool GC_suspend_thread_list(thread_act_array_t act_list, int count,
 
 #endif /* !GC_NO_THREADS_DISCOVERY */
 
-/* Caller holds allocation lock.        */
 GC_INNER void GC_stop_world(void)
 {
   task_t my_task = current_task();
   mach_port_t my_thread = mach_thread_self();
   kern_return_t kern_result;
 
+  GC_ASSERT(I_HOLD_LOCK());
+  GC_ASSERT(GC_thr_initialized);
 # ifdef DEBUG_THREADS
     GC_log_printf("Stopping the world from thread %p\n",
                   (void *)(word)my_thread);
@@ -679,11 +682,11 @@ GC_INLINE void GC_thread_resume(thread_act_t thread)
   }
 }
 
-/* Caller holds allocation lock, and has held it continuously since     */
-/* the world stopped.                                                   */
 GC_INNER void GC_start_world(void)
 {
   task_t my_task = current_task();
+
+  GC_ASSERT(I_HOLD_LOCK()); /* held continuously since the world stopped */
 # ifdef DEBUG_THREADS
     GC_log_printf("World starting\n");
 # endif

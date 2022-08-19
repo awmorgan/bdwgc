@@ -4,12 +4,13 @@
  * Copyright (c) 1998 by Fergus Henderson.  All rights reserved.
  * Copyright (c) 2000-2009 by Hewlett-Packard Development Company.
  * All rights reserved.
+ * Copyright (c) 2009-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -84,12 +85,14 @@ typedef struct GC_Thread_Rep {
                                 /* has set its SP value.  Thus, it does */
                                 /* not need a signal sent to stop it.   */
 
-    unsigned short finalizer_skipped;
-    unsigned char finalizer_nested;
+#   ifndef GC_NO_FINALIZATION
+      unsigned short finalizer_skipped;
+      unsigned char finalizer_nested;
                                 /* Used by GC_check_finalizer_nested()  */
                                 /* to minimize the level of recursion   */
                                 /* when a client finalizer allocates    */
                                 /* memory (initially both are 0).       */
+#   endif
 
     ptr_t stack_end;            /* Cold end of the stack (except for    */
                                 /* main thread).                        */
@@ -145,7 +148,9 @@ typedef struct GC_Thread_Rep {
 
 GC_EXTERN volatile GC_thread GC_threads[THREAD_TABLE_SZ];
 
-GC_EXTERN GC_bool GC_thr_initialized;
+#ifdef GC_ASSERTIONS
+  GC_EXTERN GC_bool GC_thr_initialized;
+#endif
 
 GC_INNER GC_thread GC_lookup_thread(pthread_t id);
 

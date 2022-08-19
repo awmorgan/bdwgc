@@ -149,6 +149,9 @@ jobs:
     compiler: clang
   - arch: ppc64le
     compiler: gcc
+    env:
+    - CONF_OPTIONS="--disable-disclaim"
+    - NO_CLONE_LIBATOMIC_OPS=true
   - addons:
       apt:
         packages:
@@ -367,6 +370,7 @@ jobs:
     env:
     - CONF_CFLAGS="-D AO_USE_PTHREAD_DEFS"
     - CONF_OPTIONS="--with-libatomic-ops=yes --enable-cplusplus"
+    - CFLAGS_EXTRA="-D GC_NO_FINALIZATION"
     - NO_CLONE_LIBATOMIC_OPS=true
   - addons:
       apt:
@@ -379,7 +383,7 @@ jobs:
     - NO_CLONE_LIBATOMIC_OPS=true
   - compiler: gcc
     env:
-    - CFLAGS_EXTRA="-funsigned-char -D _FORTIFY_SOURCE=2 -D DONT_ADD_BYTE_AT_END -D GC_TIME_LIMIT=10"
+    - CFLAGS_EXTRA="-funsigned-char -D _FORTIFY_SOURCE=2 -D DONT_ADD_BYTE_AT_END -D GC_TIME_LIMIT=3"
     - CONF_OPTIONS="--enable-gc-assertions --enable-cplusplus"
   - addons:
       apt:
@@ -823,6 +827,7 @@ script:
     make -f $MAKEFILE_NAME $MAKEFILE_TARGETS_CHECK CC=$CC_FOR_CHECK
             CFLAGS_EXTRA="$CFLAGS_EXTRA";
   fi
+- if [ -f cordtest.log ]; then cat cordtest.log; fi
 - if [ -f disclaim_bench.log ]; then cat disclaim_bench.log; fi
 - if [ -f disclaimtest.log ]; then cat disclaimtest.log; fi
 - if [ -f gctest.log ]; then cat gctest.log; fi

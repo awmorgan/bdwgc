@@ -2,12 +2,13 @@
  * Copyright 1988, 1989 Hans-J. Boehm, Alan J. Demers
  * Copyright (c) 1991-1994 by Xerox Corporation.  All rights reserved.
  * Copyright (c) 1999-2004 Hewlett-Packard Development Company, L.P.
+ * Copyright (c) 2008-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -225,8 +226,9 @@ GC_INNER void * GC_generic_malloc_inner(size_t lb, int k)
     GC_ASSERT(k < MAXOBJKINDS);
     lb_adjusted = ADD_SLOP(lb);
     op = GC_alloc_large_and_clear(lb_adjusted, k, IGNORE_OFF_PAGE);
-    if (op != NULL)
+    if (EXPECT(op != NULL, TRUE)) {
         GC_bytes_allocd += lb_adjusted;
+    }
     return op;
   }
 #endif
@@ -287,11 +289,8 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_generic_malloc(size_t lb, int k)
             BZERO(result, n_blocks * HBLKSIZE);
         }
     }
-    if (0 == result) {
-        return((*GC_get_oom_fn())(lb));
-    } else {
-        return(result);
-    }
+    if (EXPECT(NULL == result, FALSE)) return (*GC_get_oom_fn())(lb);
+    return result;
 }
 
 GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_kind_global(size_t lb, int k)
@@ -390,7 +389,7 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_generic_malloc_uncollectable(
       if (op /* != NULL */) { /* CPPCHECK */
         hdr * hhdr = HDR(op);
 
-        GC_ASSERT(((word)op & (HBLKSIZE - 1)) == 0); /* large block */
+        GC_ASSERT(HBLKDISPL(op) == 0); /* large block */
         /* We don't need the lock here, since we have an undisguised    */
         /* pointer.  We do need to hold the lock while we adjust        */
         /* mark bits.                                                   */
@@ -428,7 +427,7 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_uncollectable(size_t lb)
 #if defined(REDIRECT_MALLOC) && !defined(REDIRECT_MALLOC_IN_HEADER)
 
 # ifndef MSWINCE
-#  include <errno.h>
+#   include <errno.h>
 # endif
 
   /* Avoid unnecessary nested procedure calls here, by #defining some   */
@@ -488,7 +487,7 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_uncollectable(size_t lb)
 
   void * calloc(size_t n, size_t lb)
   {
-    if ((lb | n) > GC_SQRT_SIZE_MAX /* fast initial test */
+    if (EXPECT((lb | n) > GC_SQRT_SIZE_MAX, FALSE) /* fast initial test */
         && lb && n > GC_SIZE_MAX / lb)
       return (*GC_get_oom_fn())(GC_SIZE_MAX); /* n*lb overflow */
 #   if defined(GC_LINUX_THREADS)
@@ -520,9 +519,10 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_uncollectable(size_t lb)
     {
       size_t lb = strlen(s) + 1;
       char *result = (char *)REDIRECT_MALLOC_F(lb);
-      if (result == 0) {
+
+      if (EXPECT(NULL == result, FALSE)) {
         errno = ENOMEM;
-        return 0;
+        return NULL;
       }
       BCOPY(s, result, lb);
       return result;
@@ -538,10 +538,10 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_uncollectable(size_t lb)
     {
       char *copy;
       size_t len = strlen(str);
-      if (len > size)
+      if (EXPECT(len > size, FALSE))
         len = size;
       copy = (char *)REDIRECT_MALLOC_F(len + 1);
-      if (copy == NULL) {
+      if (EXPECT(NULL == copy, FALSE)) {
         errno = ENOMEM;
         return NULL;
       }
@@ -640,6 +640,7 @@ GC_API void GC_CALL GC_free(void * p)
     int knd;
     struct obj_kind * ok;
 
+    GC_ASSERT(I_HOLD_LOCK());
     h = HBLKPTR(p);
     hhdr = HDR(h);
     knd = hhdr -> hb_obj_kind;

@@ -114,8 +114,7 @@ GC_ABORT_ON_LEAK        Causes the application to be terminated once leaked or
 
 SUNOS5SIGS      Solaris-like signal handling.  This is probably misnamed,
   since it really doesn't guarantee much more than POSIX.  Currently set only
-  for Solaris2.X, HPUX, and DRSNX.  Should probably be set for some other
-  platforms.
+  for DRSNX, FreeBSD, HP/UX and Solaris.
 
 PCR     Set if the collector is being built as part of the Xerox Portable
   Common Runtime.  The client might need to define PCR_NO_RENAME and
@@ -419,7 +418,6 @@ GC_BUILTIN_ATOMIC       Use GCC atomic intrinsics instead of libatomic_ops
   primitives.
 
 GC_ALWAYS_MULTITHREADED     Force multi-threaded mode at GC initialization.
-  (Turns GC_allow_register_threads into a no-op routine.)
 
 GC_ENABLE_SUSPEND_THREAD (Linux only)   Turn on thread suspend/resume API
 support.

@@ -3,13 +3,13 @@
  * Copyright (c) 1991-1995 by Xerox Corporation.  All rights reserved.
  * Copyright (c) 1996-1999 by Silicon Graphics.  All rights reserved.
  * Copyright (c) 1999 by Hewlett-Packard Company.  All rights reserved.
- * Copyright (c) 2008-2021 Ivan Maidanski
+ * Copyright (c) 2008-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -541,7 +541,6 @@ GC_INNER const char * GC_get_maps(void)
   /* works-around the issues.                                           */
 
   /* Return the first non-addressable location > p or bound.    */
-  /* Requires the allocation lock.                              */
   STATIC ptr_t GC_find_limit_openbsd(ptr_t p, ptr_t bound)
   {
     static volatile ptr_t result;
@@ -580,14 +579,13 @@ GC_INNER const char * GC_get_maps(void)
 #   endif
 
     sigaction(SIGSEGV, &old_segv_act, 0);
-    return(result);
+    return result;
   }
 # endif /* GC_OPENBSD_UTHREADS */
 
   static volatile int firstpass;
 
   /* Return first addressable location > p or bound.    */
-  /* Requires the allocation lock.                      */
   STATIC ptr_t GC_skip_hole_openbsd(ptr_t p, ptr_t bound)
   {
     static volatile ptr_t result;
@@ -618,7 +616,7 @@ GC_INNER const char * GC_get_maps(void)
     }
 
     sigaction(SIGSEGV, &old_segv_act, 0);
-    return(result);
+    return result;
   }
 #endif /* OPENBSD */
 
@@ -779,13 +777,11 @@ GC_INNER size_t GC_page_size = 0;
       if (result != sizeof(buf)) ABORT("Weird VirtualQuery result");
       if (base != 0) *base = (ptr_t)(buf.AllocationBase);
       protect = (buf.Protect & ~(PAGE_GUARD | PAGE_NOCACHE));
-      if (!is_writable(protect)) {
-        return(0);
-      }
-      if (buf.State != MEM_COMMIT) return(0);
-      return(buf.RegionSize);
+      if (!is_writable(protect) || buf.State != MEM_COMMIT) return 0;
+      return buf.RegionSize;
     }
 
+    /* Should not acquire the GC lock as it is used by GC_DllMain.      */
     GC_API int GC_CALL GC_get_stack_base(struct GC_stack_base *sb)
     {
       ptr_t trunc_sp;
@@ -879,26 +875,23 @@ GC_INNER size_t GC_page_size = 0;
 
     typedef void (*GC_fault_handler_t)(int);
 
-#   if defined(SUNOS5SIGS) || defined(IRIX5) || defined(OSF1) \
-       || defined(HAIKU) || defined(HURD) || defined(FREEBSD) \
-       || defined(NETBSD)
+#   ifdef USE_SEGV_SIGACT
+#     ifndef OPENBSD
         static struct sigaction old_segv_act;
-#       if defined(_sigargs) /* !Irix6.x */ \
-           || defined(HURD) || defined(NETBSD) || defined(FREEBSD)
-            static struct sigaction old_bus_act;
-#       endif
-#   else
-      static GC_fault_handler_t old_segv_handler;
-#     ifdef HAVE_SIGBUS
-        static GC_fault_handler_t old_bus_handler;
 #     endif
-#   endif
+#     ifdef USE_BUS_SIGACT
+        static struct sigaction old_bus_act;
+#     endif
+#   else
+      static GC_fault_handler_t old_segv_hand;
+#     ifdef HAVE_SIGBUS
+        static GC_fault_handler_t old_bus_hand;
+#     endif
+#   endif /* !USE_SEGV_SIGACT */
 
     GC_INNER void GC_set_and_save_fault_handler(GC_fault_handler_t h)
     {
-#       if defined(SUNOS5SIGS) || defined(IRIX5) || defined(OSF1) \
-           || defined(HAIKU) || defined(HURD) || defined(FREEBSD) \
-           || defined(NETBSD) || defined(OPENBSD)
+#       ifdef USE_SEGV_SIGACT
           struct sigaction act;
 
           act.sa_handler = h;
@@ -910,29 +903,27 @@ GC_INNER size_t GC_page_size = 0;
             act.sa_flags = SA_RESTART;
 #         endif
 
-          (void) sigemptyset(&act.sa_mask);
+          (void)sigemptyset(&act.sa_mask);
           /* act.sa_restorer is deprecated and should not be initialized. */
 #         ifdef GC_IRIX_THREADS
             /* Older versions have a bug related to retrieving and      */
             /* and setting a handler at the same time.                  */
-            (void) sigaction(SIGSEGV, 0, &old_segv_act);
-            (void) sigaction(SIGSEGV, &act, 0);
+            (void)sigaction(SIGSEGV, 0, &old_segv_act);
+            (void)sigaction(SIGSEGV, &act, 0);
 #         else
-            (void) sigaction(SIGSEGV, &act, &old_segv_act);
-#           if defined(IRIX5) && defined(_sigargs) /* Irix 5.x, not 6.x */ \
-               || defined(HURD) || defined(NETBSD) || defined(FREEBSD)
-              /* Under Irix 5.x or HP/UX, we may get SIGBUS.    */
+            (void)sigaction(SIGSEGV, &act, &old_segv_act);
+#           ifdef USE_BUS_SIGACT
               /* Pthreads doesn't exist under Irix 5.x, so we   */
               /* don't have to worry in the threads case.       */
-              (void) sigaction(SIGBUS, &act, &old_bus_act);
+              (void)sigaction(SIGBUS, &act, &old_bus_act);
 #           endif
 #         endif /* !GC_IRIX_THREADS */
 #       else
-          old_segv_handler = signal(SIGSEGV, h);
+          old_segv_hand = signal(SIGSEGV, h);
 #         ifdef HAVE_SIGBUS
-            old_bus_handler = signal(SIGBUS, h);
+            old_bus_hand = signal(SIGBUS, h);
 #         endif
-#       endif
+#       endif /* !USE_SEGV_SIGACT */
 #       if defined(CPPCHECK) && defined(ADDRESS_SANITIZER)
           GC_noop1((word)&__asan_default_options);
 #       endif
@@ -962,18 +953,15 @@ GC_INNER size_t GC_page_size = 0;
 
     GC_INNER void GC_reset_fault_handler(void)
     {
-#       if defined(SUNOS5SIGS) || defined(IRIX5) || defined(OSF1) \
-           || defined(HAIKU) || defined(HURD) || defined(FREEBSD) \
-           || defined(NETBSD) || defined(OPENBSD)
-          (void) sigaction(SIGSEGV, &old_segv_act, 0);
-#         if defined(IRIX5) && defined(_sigargs) /* Irix 5.x, not 6.x */ \
-             || defined(HURD) || defined(NETBSD)
-              (void) sigaction(SIGBUS, &old_bus_act, 0);
+#       ifdef USE_SEGV_SIGACT
+          (void)sigaction(SIGSEGV, &old_segv_act, 0);
+#         ifdef USE_BUS_SIGACT
+            (void)sigaction(SIGBUS, &old_bus_act, 0);
 #         endif
 #       else
-          (void) signal(SIGSEGV, old_segv_handler);
+          (void)signal(SIGSEGV, old_segv_hand);
 #         ifdef HAVE_SIGBUS
-            (void) signal(SIGBUS, old_bus_handler);
+            (void)signal(SIGBUS, old_bus_hand);
 #         endif
 #       endif
     }
@@ -984,15 +972,11 @@ GC_INNER size_t GC_page_size = 0;
     /* Return the first non-addressable location > p (up) or    */
     /* the smallest location q s.t. [q,p) is addressable (!up). */
     /* We assume that p (up) or p-1 (!up) is addressable.       */
-    /* Requires allocation lock.                                */
     GC_ATTR_NO_SANITIZE_ADDR
     STATIC ptr_t GC_find_limit_with_bound(ptr_t p, GC_bool up, ptr_t bound)
     {
         static volatile ptr_t result;
-                /* Safer if static, since otherwise it may not be       */
-                /* preserved across the longjmp.  Can safely be         */
-                /* static since it's only called with the               */
-                /* allocation lock held.                                */
+                /* Safer if static, see that in GC_find_limit_openbsd.  */
 
         GC_ASSERT(up ? (word)bound >= MIN_PAGE_SIZE
                      : (word)bound <= ~(word)MIN_PAGE_SIZE);
@@ -1027,7 +1011,7 @@ GC_INNER size_t GC_page_size = 0;
         if (!up) {
             result += MIN_PAGE_SIZE;
         }
-        return(result);
+        return result;
     }
 
     void * GC_find_limit(void * p, int up)
@@ -1349,17 +1333,17 @@ GC_INNER size_t GC_page_size = 0;
 #       error None of HEURISTIC* and *STACKBOTTOM defined!
 #     endif
 #     if defined(STACK_GROWS_DOWN) && !defined(CPPCHECK)
-        if (result == 0)
+        if (NULL == result)
           result = (ptr_t)(signed_word)(-sizeof(ptr_t));
 #     endif
 #   endif
 #   if !defined(CPPCHECK)
       GC_ASSERT((word)GC_approx_sp() HOTTER_THAN (word)result);
 #   endif
-    return(result);
+    return result;
   }
 # define GET_MAIN_STACKBASE_SPECIAL
-#endif /* !AMIGA, !HAIKU, !OPENBSD, !OS2, !Windows */
+#endif /* !AMIGA && !HAIKU && !GC_OPENBSD_THREADS && !OS2 && !Windows */
 
 #if (defined(HAVE_PTHREAD_ATTR_GET_NP) || defined(HAVE_PTHREAD_GETATTR_NP)) \
     && defined(THREADS) && !defined(HAVE_GET_STACK_BASE)
@@ -1581,7 +1565,7 @@ GC_INNER size_t GC_page_size = 0;
 /* Register static data segment(s) as roots.  If more data segments are */
 /* added later then they need to be registered at that point (as we do  */
 /* with SunOS dynamic loading), or GC_mark_roots needs to check for     */
-/* them (as we do with PCR).  Called with allocator lock held.          */
+/* them (as we do with PCR).                                            */
 # ifdef OS2
 
 void GC_register_data_segments(void)
@@ -1924,18 +1908,18 @@ void GC_register_data_segments(void)
   /* heap sections?                                             */
   GC_INNER GC_bool GC_is_heap_base(void *p)
   {
-     int i;
+    int i;
 
-#    if defined(USE_WINALLOC) && !defined(REDIRECT_MALLOC)
-       if (GC_root_size > GC_max_root_size)
-         GC_max_root_size = GC_root_size;
-       if (GC_is_malloc_heap_base(p))
-         return TRUE;
-#    endif
-     for (i = 0; i < (int)GC_n_heap_bases; i++) {
-         if (GC_heap_bases[i] == p) return TRUE;
-     }
-     return FALSE;
+#   if defined(USE_WINALLOC) && !defined(REDIRECT_MALLOC)
+      if (GC_root_size > GC_max_root_size)
+        GC_max_root_size = GC_root_size;
+      if (GC_is_malloc_heap_base(p))
+        return TRUE;
+#   endif
+    for (i = 0; i < (int)GC_n_heap_bases; i++) {
+      if (GC_heap_bases[i] == p) return TRUE;
+    }
+    return FALSE;
   }
 
 #ifdef MSWIN32
@@ -2054,15 +2038,15 @@ void GC_register_data_segments(void)
         /* As above, we go to plan B    */
         result = (ptr_t)GC_find_limit(DATAEND, FALSE);
     }
-    return(result);
+    return result;
   }
 #endif /* DATASTART_USES_BSDGETDATASTART */
 
 #ifdef AMIGA
 
-#  define GC_AMIGA_DS
-#  include "extra/AmigaOS.c"
-#  undef GC_AMIGA_DS
+# define GC_AMIGA_DS
+# include "extra/AmigaOS.c"
+# undef GC_AMIGA_DS
 
 #elif defined(OPENBSD)
 
@@ -2271,7 +2255,7 @@ void GC_register_data_segments(void)
     if (((word)result % HBLKSIZE) != 0)
       ABORT(
        "GC_unix_get_mem: Memory returned by mmap is not aligned to HBLKSIZE.");
-    return((ptr_t)result);
+    return (ptr_t)result;
   }
 # endif  /* !MSWIN_XBOX1 */
 
@@ -2323,7 +2307,7 @@ STATIC ptr_t GC_unix_sbrk_get_mem(size_t bytes)
 # ifdef IRIX5
     __UNLOCK_MALLOC();
 # endif
-  return(result);
+  return result;
 }
 
 ptr_t GC_unix_get_mem(size_t bytes)
@@ -2366,12 +2350,12 @@ void * os2_alloc(size_t bytes)
     if (DosAllocMem(&result, bytes, (PAG_READ | PAG_WRITE | PAG_COMMIT)
                                     | (GC_pages_executable ? PAG_EXECUTE : 0))
                     != NO_ERROR) {
-        return(0);
+        return NULL;
     }
     /* FIXME: What's the purpose of this recursion?  (Probably, if      */
     /* DosAllocMem returns memory at 0 address then just retry once.)   */
-    if (result == 0) return(os2_alloc(bytes));
-    return(result);
+    if (NULL == result) return os2_alloc(bytes);
+    return result;
 }
 
 # endif /* OS2 */
@@ -2435,11 +2419,10 @@ void * os2_alloc(size_t bytes)
         if (HBLKDISPL(result) != 0) ABORT("Bad VirtualAlloc result");
         GC_heap_lengths[i] += bytes;
     }
-
-    return(result);
+    return result;
   }
 
-#elif (defined(USE_WINALLOC) && !defined(MSWIN_XBOX1)) || defined(CYGWIN32)
+#elif defined(USE_WINALLOC) /* && !MSWIN_XBOX1 */ || defined(CYGWIN32)
 
 # ifdef USE_GLOBAL_ALLOC
 #   define GLOBAL_ALLOC_TEST 1
@@ -2471,8 +2454,8 @@ void * os2_alloc(size_t bytes)
         /* problems, so we dodge the issue.                     */
         result = (ptr_t)GlobalAlloc(0, SIZET_SAT_ADD(bytes, HBLKSIZE));
         /* Align it at HBLKSIZE boundary.       */
-        result = (ptr_t)(((word)result + HBLKSIZE - 1)
-                         & ~(word)(HBLKSIZE - 1));
+        result = (ptr_t)(((word)result + HBLKSIZE-1)
+                         & ~(word)(HBLKSIZE-1));
       } else
 #   endif
     /* else */ {
@@ -2515,8 +2498,8 @@ void * os2_alloc(size_t bytes)
         /* If I read the documentation correctly, this can      */
         /* only happen if HBLKSIZE > 64 KB or not a power of 2. */
     if (GC_n_heap_bases >= MAX_HEAP_SECTS) ABORT("Too many heap sections");
-    if (0 != result) GC_heap_bases[GC_n_heap_bases++] = result;
-    return(result);
+    if (result != NULL) GC_heap_bases[GC_n_heap_bases++] = result;
+    return result;
   }
 #endif /* USE_WINALLOC || CYGWIN32 */
 
@@ -2827,7 +2810,7 @@ PCR_ERes GC_push_thread_stack(PCR_Th_T *t, PCR_Any dummy)
     info.ti_stkLow = info.ti_stkHi = 0;
     result = PCR_ThCtl_GetInfo(t, &info);
     GC_push_all_stack((ptr_t)(info.ti_stkLow), (ptr_t)(info.ti_stkHi));
-    return(result);
+    return result;
 }
 
 /* Push the contents of an old object. We treat this as stack   */
@@ -2836,7 +2819,7 @@ PCR_ERes GC_push_thread_stack(PCR_Th_T *t, PCR_Any dummy)
 PCR_ERes GC_push_old_obj(void *p, size_t size, PCR_Any data)
 {
     GC_push_all_stack((ptr_t)p, (ptr_t)p + size);
-    return(PCR_ERes_okay);
+    return PCR_ERes_okay;
 }
 
 extern struct PCR_MM_ProcsRep * GC_old_allocator;
@@ -3078,8 +3061,6 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
 #endif /* !GWW_VDB && !SOFT_VDB */
 
 #ifdef DEFAULT_VDB
-  /* All of the following assume the allocation lock is held.   */
-
   /* The client asserts that unallocated pages in the heap are never    */
   /* written.                                                           */
 
@@ -3197,20 +3178,12 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
     typedef void (* PLAIN_HNDLR_PTR)(int);
 # endif
 
-# if defined(__GLIBC__)
-#   if __GLIBC__ < 2 || __GLIBC__ == 2 && __GLIBC_MINOR__ < 2
-#       error glibc too old?
-#   endif
-# endif
-
 #ifndef DARWIN
   STATIC SIG_HNDLR_PTR GC_old_segv_handler = 0;
                         /* Also old MSWIN32 ACCESS_VIOLATION filter */
-# if defined(FREEBSD) || defined(HPUX) || defined(HURD) || defined(LINUX)
+# ifdef USE_BUS_SIGACT
     STATIC SIG_HNDLR_PTR GC_old_bus_handler = 0;
-#   ifndef LINUX
-      STATIC GC_bool GC_old_bus_handler_used_si = FALSE;
-#   endif
+    STATIC GC_bool GC_old_bus_handler_used_si = FALSE;
 # endif
 # if !defined(MSWIN32) && !defined(MSWINCE)
     STATIC GC_bool GC_old_segv_handler_used_si = FALSE;
@@ -3241,7 +3214,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
 
 # if !defined(MSWIN32) && !defined(MSWINCE)
 #   include <errno.h>
-#   if defined(FREEBSD) || defined(HURD) || defined(HPUX)
+#   ifdef USE_BUS_SIGACT
 #     define SIG_OK (sig == SIGBUS || sig == SIGSEGV)
 #   else
 #     define SIG_OK (sig == SIGSEGV)
@@ -3337,7 +3310,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
 #           else
                 GC_bool used_si;
 
-#             if defined(FREEBSD) || defined(HURD) || defined(HPUX)
+#             ifdef USE_BUS_SIGACT
                 if (sig == SIGBUS) {
                    old_handler = GC_old_bus_handler;
                    used_si = GC_old_bus_handler_used_si;
@@ -3354,7 +3327,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
                     ABORT_ARG1("Unexpected segmentation fault outside heap",
                                " at %p", (void *)addr);
 #               else
-                    return(EXCEPTION_CONTINUE_SEARCH);
+                    return EXCEPTION_CONTINUE_SEARCH;
 #               endif
             } else {
                 /*
@@ -3363,10 +3336,10 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
                  * if so call it using that style.
                  */
 #               if defined(MSWIN32) || defined(MSWINCE)
-                    return((*old_handler)(exc_info));
+                    return (*old_handler)(exc_info);
 #               else
                     if (used_si)
-                      ((SIG_HNDLR_PTR)old_handler) (sig, si, raw_sc);
+                      ((SIG_HNDLR_PTR)old_handler)(sig, si, raw_sc);
                     else
                       /* FIXME: should pass nonstandard args as well. */
                       ((PLAIN_HNDLR_PTR)(signed_word)old_handler)(sig);
@@ -3394,7 +3367,7 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
         /* The write may not take place before dirty bits are read.     */
         /* But then we'll fault again ...                               */
 #       if defined(MSWIN32) || defined(MSWINCE)
-            return(EXCEPTION_CONTINUE_EXECUTION);
+            return EXCEPTION_CONTINUE_EXECUTION;
 #       else
             return;
 #       endif
@@ -3488,28 +3461,21 @@ GC_API GC_push_other_roots_proc GC_CALL GC_get_push_other_roots(void)
       if (GC_old_segv_handler != (SIG_HNDLR_PTR)(signed_word)SIG_DFL) {
         GC_VERBOSE_LOG_PRINTF("Replaced other SIGSEGV handler\n");
       }
-#   if defined(HPUX) || defined(LINUX) || defined(HURD) \
-       || (defined(FREEBSD) && (defined(__GLIBC__) || defined(SUNOS5SIGS)))
-      sigaction(SIGBUS, &act, &oldact);
-      if ((oldact.sa_flags & SA_SIGINFO) != 0) {
-        GC_old_bus_handler = oldact.sa_sigaction;
-#       if !defined(LINUX)
+#     ifdef USE_BUS_SIGACT
+        sigaction(SIGBUS, &act, &oldact);
+        if ((oldact.sa_flags & SA_SIGINFO) != 0) {
+          GC_old_bus_handler = oldact.sa_sigaction;
           GC_old_bus_handler_used_si = TRUE;
-#       endif
-      } else {
-        GC_old_bus_handler = (SIG_HNDLR_PTR)(signed_word)oldact.sa_handler;
-      }
-      if (GC_old_bus_handler == (SIG_HNDLR_PTR)(signed_word)SIG_IGN) {
-        WARN("Previously ignored bus error!?\n", 0);
-#       if !defined(LINUX)
+        } else {
+          GC_old_bus_handler = (SIG_HNDLR_PTR)(signed_word)oldact.sa_handler;
+        }
+        if (GC_old_bus_handler == (SIG_HNDLR_PTR)(signed_word)SIG_IGN) {
+          WARN("Previously ignored bus error!?\n", 0);
           GC_old_bus_handler = (SIG_HNDLR_PTR)(signed_word)SIG_DFL;
-#       else
-          /* GC_old_bus_handler is not used by GC_write_fault_handler.  */
-#       endif
-      } else if (GC_old_bus_handler != (SIG_HNDLR_PTR)(signed_word)SIG_DFL) {
+        } else if (GC_old_bus_handler != (SIG_HNDLR_PTR)(signed_word)SIG_DFL) {
           GC_VERBOSE_LOG_PRINTF("Replaced other SIGBUS handler\n");
-      }
-#   endif /* HPUX || LINUX || HURD || (FREEBSD && SUNOS5SIGS) */
+        }
+#     endif
 #   endif /* ! MS windows */
 #   if defined(CPPCHECK) && defined(ADDRESS_SANITIZER)
       GC_noop1((word)&__asan_default_options);
@@ -4414,7 +4380,7 @@ catch_exception_raise_state(mach_port_name_t exception_port GC_ATTR_UNUSED,
     thread_state_t new_state GC_ATTR_UNUSED, int new_stateCnt GC_ATTR_UNUSED)
 {
   ABORT_RET("Unexpected catch_exception_raise_state invocation");
-  return(KERN_INVALID_ARGUMENT);
+  return KERN_INVALID_ARGUMENT;
 }
 
 GC_API_OSCALL kern_return_t
@@ -4427,7 +4393,7 @@ catch_exception_raise_state_identity(
     thread_state_t new_state GC_ATTR_UNUSED, int new_stateCnt GC_ATTR_UNUSED)
 {
   ABORT_RET("Unexpected catch_exception_raise_state_identity invocation");
-  return(KERN_INVALID_ARGUMENT);
+  return KERN_INVALID_ARGUMENT;
 }
 
 #define MAX_EXCEPTION_PORTS 16
@@ -4706,11 +4672,11 @@ GC_INNER GC_bool GC_dirty_init(void)
   if (r != KERN_SUCCESS)
     ABORT("mach_port_insert_right failed (exception port)");
 
-#  if defined(THREADS)
-     r = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &GC_ports.reply);
-     if(r != KERN_SUCCESS)
-       ABORT("mach_port_allocate failed (reply port)");
-#  endif
+# if defined(THREADS)
+    r = mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &GC_ports.reply);
+    if (r != KERN_SUCCESS)
+      ABORT("mach_port_allocate failed (reply port)");
+# endif
 
   /* The exceptions we want to catch */
   mask = EXC_MASK_BAD_ACCESS;
@@ -5027,11 +4993,11 @@ GC_API int GC_CALL GC_get_pages_executable(void)
 #endif
 
 #if defined(SPARC)
-#  if defined(LINUX)
-#    include <features.h>
+# if defined(LINUX)
+#   include <features.h>
 
 #   if defined(SAVE_CALL_CHAIN)
-     struct frame {
+      struct frame {
         long    fr_local[8];
         long    fr_arg[6];
         struct frame *fr_savfp;
@@ -5041,30 +5007,28 @@ GC_API int GC_CALL GC_get_pages_executable(void)
 #       endif
         long    fr_argd[6];
         long    fr_argx[0];
-     };
+      };
 #   endif
-#  elif defined (DRSNX)
-#    include <sys/sparc/frame.h>
-#  elif defined(OPENBSD)
-#    include <frame.h>
-#  elif defined(FREEBSD) || defined(NETBSD)
-#    include <machine/frame.h>
-#  else
-#    include <sys/frame.h>
-#  endif
-#  if NARGS > 6
-#    error We only know how to get the first 6 arguments
-#  endif
+# elif defined (DRSNX)
+#   include <sys/sparc/frame.h>
+# elif defined(OPENBSD)
+#   include <frame.h>
+# elif defined(FREEBSD) || defined(NETBSD)
+#   include <machine/frame.h>
+# else
+#   include <sys/frame.h>
+# endif
+# if NARGS > 6
+#   error We only know how to get the first 6 arguments
+# endif
 #endif /* SPARC */
 
 #ifdef NEED_CALLINFO
 /* Fill in the pc and argument information for up to NFRAMES of my      */
 /* callers.  Ignore my frame and my callers frame.                      */
-
-#ifdef LINUX
+# ifdef LINUX
 #   include <unistd.h>
-#endif
-
+# endif
 #endif /* NEED_CALLINFO */
 
 #if defined(GC_HAVE_BUILTIN_BACKTRACE)
@@ -5074,7 +5038,7 @@ GC_API int GC_CALL GC_get_pages_executable(void)
     char** backtrace_symbols(void* const addresses[], int count);
     EXTERN_C_END
 # else
-#  include <execinfo.h>
+#   include <execinfo.h>
 # endif
 #endif /* GC_HAVE_BUILTIN_BACKTRACE */
 
@@ -5129,17 +5093,17 @@ GC_INNER void GC_save_callers(struct callinfo info[NFRAMES])
 #else /* No builtin backtrace; do it ourselves */
 
 #if (defined(OPENBSD) || defined(NETBSD) || defined(FREEBSD)) && defined(SPARC)
-#  define FR_SAVFP fr_fp
-#  define FR_SAVPC fr_pc
+# define FR_SAVFP fr_fp
+# define FR_SAVPC fr_pc
 #else
-#  define FR_SAVFP fr_savfp
-#  define FR_SAVPC fr_savpc
+# define FR_SAVFP fr_savfp
+# define FR_SAVPC fr_savpc
 #endif
 
 #if defined(SPARC) && (defined(__arch64__) || defined(__sparcv9))
-#   define BIAS 2047
+# define BIAS 2047
 #else
-#   define BIAS 0
+# define BIAS 0
 #endif
 
 GC_INNER void GC_save_callers(struct callinfo info[NFRAMES])
@@ -5184,7 +5148,7 @@ GC_INNER void GC_save_callers(struct callinfo info[NFRAMES])
 
 #ifdef NEED_CALLINFO
 
-/* Print info to stderr.  We do NOT hold the allocation lock */
+/* Print info to stderr.  We do NOT hold the allocation lock.   */
 GC_INNER void GC_print_callers(struct callinfo info[NFRAMES])
 {
     int i;

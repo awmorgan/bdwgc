@@ -5,7 +5,7 @@
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -84,6 +84,7 @@ static back_edges *avail_back_edges = 0;
 
 static back_edges * new_back_edges(void)
 {
+  GC_ASSERT(I_HOLD_LOCK());
   if (0 == back_edge_space) {
     size_t bytes_to_get = ROUNDUP_PAGESIZE_IF_MMAP(MAX_BACK_EDGE_STRUCTS
                                                    * sizeof(back_edges));
@@ -282,7 +283,7 @@ static void add_edge(ptr_t p, ptr_t q)
 
 typedef void (*per_object_func)(ptr_t p, size_t n_bytes, word gc_descr);
 
-static void per_object_helper(struct hblk *h, word fn)
+static GC_CALLBACK void per_object_helper(struct hblk *h, GC_word fn)
 {
   hdr * hhdr = HDR(h);
   size_t sz = (size_t)hhdr->hb_sz;

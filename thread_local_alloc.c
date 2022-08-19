@@ -1,11 +1,12 @@
 /*
  * Copyright (c) 2000-2005 by Hewlett-Packard Company.  All rights reserved.
+ * Copyright (c) 2008-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -53,8 +54,7 @@ static void return_single_freelist(void *fl, void **gfl)
     }
 }
 
-/* Recover the contents of the freelist array fl into the global one gfl.*/
-/* We hold the allocator lock.                                          */
+/* Recover the contents of the freelist array fl into the global one gfl. */
 static void return_freelists(void **fl, void **gfl)
 {
     int i;
@@ -128,11 +128,11 @@ GC_INNER void GC_init_thread_local(GC_tlfs p)
 #   endif
 }
 
-/* We hold the allocator lock.  */
 GC_INNER void GC_destroy_thread_local(GC_tlfs p)
 {
     int k;
 
+    GC_ASSERT(I_HOLD_LOCK());
     /* We currently only do this from the thread itself.        */
     GC_STATIC_ASSERT(THREAD_FREELISTS_KINDS <= MAXOBJKINDS);
     for (k = 0; k < THREAD_FREELISTS_KINDS; ++k) {

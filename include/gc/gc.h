@@ -5,13 +5,13 @@
  * Copyright (c) 1999 by Hewlett-Packard Company.  All rights reserved.
  * Copyright (c) 2007 Free Software Foundation, Inc.
  * Copyright (c) 2000-2011 by Hewlett-Packard Development Company.
- * Copyright (c) 2009-2020 Ivan Maidanski
+ * Copyright (c) 2009-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -87,32 +87,29 @@ GC_API GC_word GC_CALL GC_get_gc_no(void);
                         /* avoid data races on multiprocessors.         */
 
 #ifdef GC_THREADS
+  /* GC is parallelized for performance on multiprocessors.  Set to     */
+  /* a non-zero value when client calls GC_start_mark_threads()         */
+  /* directly or starts the first non-main thread, provided the         */
+  /* collector is built with PARALLEL_MARK defined, and either          */
+  /* GC_MARKERS (or GC_NPROCS) environment variable is set to a value   */
+  /* bigger than 1, or multiple cores (processors) are available, or    */
+  /* the client calls GC_set_markers_count() before GC initialization.  */
+  /* After setting, GC_parallel value is equal to the number of marker  */
+  /* threads minus one (i.e. the number of existing parallel marker     */
+  /* threads excluding the initiating one).                             */
   GC_API GC_ATTR_DEPRECATED int GC_parallel;
-                        /* GC is parallelized for performance on        */
-                        /* multiprocessors.  Set to a non-zero value    */
-                        /* only implicitly if collector is built with   */
-                        /* PARALLEL_MARK defined, and if either         */
-                        /* GC_MARKERS (or GC_NPROCS) environment        */
-                        /* variable is set to > 1, or multiple cores    */
-                        /* (processors) are available, or the client    */
-                        /* calls GC_set_markers_count() before the GC   */
-                        /* initialization.  The getter does             */
-                        /* not use or need synchronization (i.e.        */
-                        /* acquiring the GC lock).  GC_parallel value   */
-                        /* is equal to the number of marker threads     */
-                        /* minus one (i.e. number of existing parallel  */
-                        /* marker threads excluding the initiating one).*/
-  GC_API int GC_CALL GC_get_parallel(void);
-
-  /* Set the number of marker threads (including the initiating one)    */
-  /* to the desired value at start-up.  Zero value means the collector  */
-  /* is to decide.  Has no effect if called after GC initialization.    */
-  /* If the correct non-zero value is passed, then GC_parallel should   */
-  /* be set to the value minus one.  The function does not use any      */
-  /* synchronization.                                                   */
-  GC_API void GC_CALL GC_set_markers_count(unsigned);
 #endif
 
+/* Return value of GC_parallel.  Does not acquire the GC lock.          */
+GC_API int GC_CALL GC_get_parallel(void);
+
+/* Set the number of marker threads (including the initiating one)      */
+/* to the desired value at start-up.  Zero value means the collector    */
+/* is to decide.  If the correct non-zero value is passed, then later   */
+/* GC_parallel will be set to the value minus one.  Has no effect if    */
+/* called after GC initialization.  Does not itself cause creation of   */
+/* the marker threads.  Does not use any synchronization.               */
+GC_API void GC_CALL GC_set_markers_count(unsigned);
 
 /* Public R/W variables */
 /* The supplied setter and getter functions are preferred for new code. */
@@ -512,7 +509,7 @@ GC_API void GC_CALL GC_set_handle_fork(int);
 /* before fork(); GC_atfork_parent should be invoked just after fork in */
 /* the branch that corresponds to parent process (i.e., fork result is  */
 /* non-zero); GC_atfork_child is to be called immediately in the child  */
-/* branch (i.e., fork result is 0). Note that GC_atfork_child() call    */
+/* branch (i.e., fork result is 0).  Note that GC_atfork_child() call   */
 /* should, of course, precede GC_start_mark_threads call (if any).      */
 GC_API void GC_CALL GC_atfork_prepare(void);
 GC_API void GC_CALL GC_atfork_parent(void);
@@ -628,8 +625,8 @@ GC_API void * GC_CALL GC_realloc(void * /* old_object */,
                                  size_t /* new_size_in_bytes */)
                         /* 'realloc' attr */ GC_ATTR_ALLOC_SIZE(2);
 
-/* Explicitly increase the heap size.   */
-/* Returns 0 on failure, 1 on success.  */
+/* Increase the heap size explicitly.  Includes a GC_init() call.       */
+/* Returns 0 on failure, 1 on success.                                  */
 GC_API int GC_CALL GC_expand_hp(size_t /* number_of_bytes */);
 
 /* Limit the heap size to n bytes.  Useful when you're debugging,       */
@@ -655,13 +652,13 @@ GC_API void GC_CALL GC_clear_exclusion_table(void);
 GC_API void GC_CALL GC_clear_roots(void);
 
 /* Add a root segment.  Wizards only.                                   */
+/* May merge adjacent or overlapping segments if appropriate.           */
 /* Both segment start and end are not needed to be pointer-aligned.     */
 /* low_address must not be greater than high_address_plus_1.            */
 GC_API void GC_CALL GC_add_roots(void * /* low_address */,
                                  void * /* high_address_plus_1 */);
 
-/* Remove a root segment.  Wizards only.                                */
-/* May be unimplemented on some platforms.                              */
+/* Remove root segments located fully in the region.  Wizards only.     */
 GC_API void GC_CALL GC_remove_roots(void * /* low_address */,
                                     void * /* high_address_plus_1 */);
 
@@ -881,7 +878,7 @@ GC_API int GC_CALL GC_get_manual_vdb_allowed(void);
 /* allocation.  Must be called before any such GC_gcj_malloc() calls.   */
 /* For best performance, should be called as early as possible.         */
 /* On some platforms, calling it later may have adverse effects.        */
-/* Safe to call before GC_INIT().  Includes a  GC_init() call.          */
+/* Safe to call before GC_INIT().  Includes a GC_init() call.           */
 GC_API void GC_CALL GC_enable_incremental(void);
 
 /* Return non-zero (TRUE) if and only if the incremental mode is on.    */
@@ -1391,15 +1388,16 @@ GC_API int GC_CALL GC_invoke_finalizers(void);
 #   define GC_reachable_here(ptr) \
                 __asm__ __volatile__ (" " : : "X"(ptr) : "memory")
 # endif
-#else
-  GC_API void GC_CALL GC_noop1(GC_word);
-# ifdef LINT2
-#   define GC_reachable_here(ptr) GC_noop1(~(GC_word)(ptr)^(~(GC_word)0))
+#elif defined(LINT2)
+# define GC_reachable_here(ptr) GC_noop1(~(GC_word)(ptr)^(~(GC_word)0))
                 /* The expression matches the one of COVERT_DATAFLOW(). */
-# else
-#   define GC_reachable_here(ptr) GC_noop1((GC_word)(ptr))
-# endif
+#else
+# define GC_reachable_here(ptr) GC_noop1((GC_word)(ptr))
 #endif
+
+/* Make the argument appear live to compiler.  Should be robust against */
+/* the whole program analysis.                                          */
+GC_API void GC_CALL GC_noop1(GC_word);
 
 /* GC_set_warn_proc can be used to redirect or filter warning messages. */
 /* p may not be a NULL pointer.  msg is printf format string (arg must  */
@@ -1510,12 +1508,19 @@ GC_API void * GC_CALL GC_call_with_stack_base(GC_stack_base_func /* fn */,
 #define GC_NOT_FOUND 4          /* Requested link not found (returned   */
                                 /* by GC_move_disappearing_link).       */
 
+/* Start the parallel marker threads, if available.  Useful, e.g.,      */
+/* after POSIX fork in a child process (provided not followed by exec)  */
+/* or in single-threaded clients (provided it is OK for the client to   */
+/* perform marking in parallel).  Acquires the GC lock to avoid a race. */
+GC_API void GC_CALL GC_start_mark_threads(void);
+
 #if defined(GC_DARWIN_THREADS) || defined(GC_WIN32_THREADS)
   /* Use implicit thread registration and processing (via Win32 DllMain */
   /* or Darwin task_threads).  Deprecated.  Must be called before       */
   /* GC_INIT() and other GC routines.  Should be avoided if             */
-  /* GC_pthread_create, GC_beginthreadex (or GC_CreateThread) could be  */
-  /* called instead.  Disables parallelized GC on Win32.                */
+  /* GC_pthread_create, GC_beginthreadex (or GC_CreateThread), or       */
+  /* GC_register_my_thread could be called instead.                     */
+  /* Includes a GC_init() call.  Disables parallelized GC on Win32.     */
   GC_API void GC_CALL GC_use_threads_discovery(void);
 #endif
 
@@ -1538,10 +1543,6 @@ GC_API void * GC_CALL GC_call_with_stack_base(GC_stack_base_func /* fn */,
   /* systems.  Return -1 otherwise.                                     */
   GC_API int GC_CALL GC_get_thr_restart_signal(void);
 
-  /* Restart marker threads after POSIX fork in child.  Meaningless in  */
-  /* other situations.  Should not be called if fork followed by exec.  */
-  GC_API void GC_CALL GC_start_mark_threads(void);
-
   /* Explicitly enable GC_register_my_thread() invocation.              */
   /* Done implicitly if a GC thread-creation function is called (or     */
   /* implicit thread registration is activated, or the collector is     */
@@ -1549,6 +1550,7 @@ GC_API void * GC_CALL GC_call_with_stack_base(GC_stack_base_func /* fn */,
   /* must be called from the main (or any previously registered) thread */
   /* between the collector initialization and the first explicit        */
   /* registering of a thread (it should be called as late as possible). */
+  /* Includes a GC_start_mark_threads() call.                           */
   GC_API void GC_CALL GC_allow_register_threads(void);
 
   /* Register the current thread, with the indicated stack bottom, as   */

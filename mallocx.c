@@ -3,13 +3,13 @@
  * Copyright (c) 1991-1994 by Xerox Corporation.  All rights reserved.
  * Copyright (c) 1996 by Silicon Graphics.  All rights reserved.
  * Copyright (c) 2000 by Hewlett-Packard Company.  All rights reserved.
- * Copyright (c) 2009-2021 Ivan Maidanski
+ * Copyright (c) 2009-2022 Ivan Maidanski
  *
  * THIS MATERIAL IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED
  * OR IMPLIED.  ANY USE IS AT YOUR OWN RISK.
  *
  * Permission is hereby granted to use or copy this program
- * for any purpose,  provided the above notices are retained on all copies.
+ * for any purpose, provided the above notices are retained on all copies.
  * Permission to modify the code and to distribute modified code is granted,
  * provided the above notices are retained, and a notice that the code was
  * modified is included with the above copyright notice.
@@ -89,7 +89,7 @@ GC_API void * GC_CALL GC_realloc(void * p, size_t lb)
     size_t orig_sz; /* Original sz in bytes     */
     int obj_kind;
 
-    if (p == 0) return(GC_malloc(lb));  /* Required by ANSI */
+    if (NULL == p) return GC_malloc(lb);  /* Required by ANSI */
     if (0 == lb) /* and p != NULL */ {
 #     ifndef IGNORE_FREE
         GC_free(p);
@@ -106,7 +106,7 @@ GC_API void * GC_CALL GC_realloc(void * p, size_t lb)
         /* Round it up to the next whole heap block */
         word descr = GC_obj_kinds[obj_kind].ok_descriptor;
 
-        sz = (sz + HBLKSIZE-1) & ~HBLKMASK;
+        sz = (sz + HBLKSIZE-1) & ~(HBLKSIZE-1);
         if (GC_obj_kinds[obj_kind].ok_relocate_descr)
           descr += sz;
         /* GC_realloc might be changing the block size while            */
@@ -154,13 +154,13 @@ GC_API void * GC_CALL GC_realloc(void * p, size_t lb)
               /* tracing.                                             */
                 BZERO((ptr_t)cleared_p + lb, orig_sz - lb);
             }
-            return(p);
+            return p;
         }
         /* shrink */
         sz = lb;
     }
     result = GC_generic_or_special_malloc((word)lb, obj_kind);
-    if (result != NULL) {
+    if (EXPECT(result != NULL, TRUE)) {
       /* In case of shrink, it could also return original object.       */
       /* But this gives the client warning of imminent disaster.        */
       BCOPY(p, result, sz);
@@ -184,7 +184,7 @@ GC_API void * GC_CALL GC_realloc(void * p, size_t lb)
 # if !defined(REDIRECT_MALLOC_IN_HEADER)
     void * realloc(void * p, size_t lb)
     {
-      return(REDIRECT_REALLOC(p, lb));
+      return REDIRECT_REALLOC(p, lb);
     }
 # endif
 
@@ -240,7 +240,7 @@ GC_API GC_ATTR_MALLOC void * GC_CALL
     if (init && !GC_debugging_started) {
         BZERO(result, n_blocks * HBLKSIZE);
     }
-    return(result);
+    return result;
 }
 
 GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_ignore_off_page(size_t lb)
@@ -413,7 +413,7 @@ GC_API void GC_CALL GC_generic_malloc_many(size_t lb, int k, void **result)
                 if (GC_fl_builder_count == 0) GC_notify_all_builder();
                 GC_release_mark_lock();
                 LOCK();
-                /* GC lock is needed for reclaim list access.   We      */
+                /* The GC lock is needed for reclaim list access.  We   */
                 /* must decrement fl_builder_count before reacquiring   */
                 /* the lock.  Hopefully this path is rare.              */
 
@@ -507,7 +507,7 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_memalign(size_t align, size_t lb)
 
     if (align <= GRANULE_BYTES) return GC_malloc(lb);
     if (align >= HBLKSIZE/2 || lb >= HBLKSIZE/2) {
-        if (align > HBLKSIZE) {
+        if (EXPECT(align > HBLKSIZE, FALSE)) {
           return (*GC_get_oom_fn())(LONG_MAX-1024); /* Fail */
         }
         return GC_malloc(lb <= HBLKSIZE? HBLKSIZE : lb);
@@ -565,7 +565,7 @@ GC_API GC_ATTR_MALLOC char * GC_CALL GC_strdup(const char *s)
   if (s == NULL) return NULL;
   lb = strlen(s) + 1;
   copy = (char *)GC_malloc_atomic(lb);
-  if (NULL == copy) {
+  if (EXPECT(NULL == copy, FALSE)) {
 #   ifndef MSWINCE
       errno = ENOMEM;
 #   endif
@@ -579,10 +579,10 @@ GC_API GC_ATTR_MALLOC char * GC_CALL GC_strndup(const char *str, size_t size)
 {
   char *copy;
   size_t len = strlen(str); /* str is expected to be non-NULL  */
-  if (len > size)
+  if (EXPECT(len > size, FALSE))
     len = size;
   copy = (char *)GC_malloc_atomic(len + 1);
-  if (copy == NULL) {
+  if (EXPECT(NULL == copy, FALSE)) {
 #   ifndef MSWINCE
       errno = ENOMEM;
 #   endif
@@ -602,7 +602,7 @@ GC_API GC_ATTR_MALLOC char * GC_CALL GC_strndup(const char *str, size_t size)
     size_t lb = (wcslen(str) + 1) * sizeof(wchar_t);
     wchar_t *copy = (wchar_t *)GC_malloc_atomic(lb);
 
-    if (copy == NULL) {
+    if (EXPECT(NULL == copy, FALSE)) {
 #     ifndef MSWINCE
         errno = ENOMEM;
 #     endif
