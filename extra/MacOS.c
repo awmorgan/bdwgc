@@ -122,28 +122,13 @@ void GC_MacFreeTemporaryMemory(void)
 # endif
 
     if (theTemporaryMemory != NULL) {
-#     if !defined(SHARED_LIBRARY_BUILD)
-        long totalMemoryUsed = 0;
-#     endif
         TemporaryMemoryHandle tempMemBlock = theTemporaryMemory;
         while (tempMemBlock /* != NULL */) {
                 TemporaryMemoryHandle nextBlock = (**tempMemBlock).nextBlock;
-#             if !defined(SHARED_LIBRARY_BUILD)
-                totalMemoryUsed += GetHandleSize((Handle)tempMemBlock);
-#             endif
                 DisposeHandle((Handle)tempMemBlock);
                 tempMemBlock = nextBlock;
         }
         theTemporaryMemory = NULL;
-
-#       if !defined(SHARED_LIBRARY_BUILD)
-          if (GC_print_stats) {
-            fprintf(stdout, "[total memory used:  %ld bytes.]\n",
-                    totalMemoryUsed);
-            fprintf(stdout, "[total collections: %lu]\n",
-                    (unsigned long)GC_gc_no);
-          }
-#       endif
     }
 }
 

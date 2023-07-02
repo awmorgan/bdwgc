@@ -25,9 +25,15 @@ struct treenode {
 static struct treenode *root[10] = { 0 };
 static struct treenode *root_nz[10] = { (struct treenode *)(GC_word)2 };
 
+/* Declare it to avoid "no previous prototype" clang warning.   */
+GC_TEST_EXPORT_API struct treenode ** libsrl_getpelem(int i, int j);
+
 #ifdef STATICROOTSLIB2
 # define libsrl_getpelem libsrl_getpelem2
 #else
+
+  GC_TEST_EXPORT_API struct treenode * libsrl_mktree(int i);
+  GC_TEST_EXPORT_API void * libsrl_init(void);
 
   GC_TEST_EXPORT_API struct treenode * libsrl_mktree(int i)
   {
@@ -68,5 +74,9 @@ static struct treenode *root_nz[10] = { (struct treenode *)(GC_word)2 };
 
 GC_TEST_EXPORT_API struct treenode ** libsrl_getpelem(int i, int j)
 {
+# if defined(CPPCHECK)
+    struct treenode node = { 0, 0 };
+    GC_noop1((GC_word)node.x | (GC_word)node.y);
+# endif
   return &((j & 1) != 0 ? root_nz : root)[i];
 }

@@ -22,8 +22,6 @@
 
 #include "private/thread_local_alloc.h"
 
-#include <stdlib.h>
-
 #if defined(USE_COMPILER_TLS)
   __thread GC_ATTR_TLS_FAST
 #elif defined(USE_WIN32_COMPILER_TLS)
@@ -100,7 +98,7 @@ GC_INNER void GC_init_thread_local(GC_tlfs p)
     if (!EXPECT(keys_initialized, TRUE)) {
 #       ifdef USE_CUSTOM_SPECIFIC
           /* Ensure proper alignment of a "pushed" GC symbol.   */
-          GC_ASSERT((word)&GC_thread_key % sizeof(word) == 0);
+          GC_ASSERT((word)(&GC_thread_key) % sizeof(word) == 0);
 #       endif
         res = GC_key_create(&GC_thread_key, reset_thread_key);
         if (COVERT_DATAFLOW(res) != 0) {
@@ -133,6 +131,7 @@ GC_INNER void GC_destroy_thread_local(GC_tlfs p)
     int k;
 
     GC_ASSERT(I_HOLD_LOCK());
+    GC_ASSERT(GC_getspecific(GC_thread_key) == p);
     /* We currently only do this from the thread itself.        */
     GC_STATIC_ASSERT(THREAD_FREELISTS_KINDS <= MAXOBJKINDS);
     for (k = 0; k < THREAD_FREELISTS_KINDS; ++k) {
@@ -143,6 +142,24 @@ GC_INNER void GC_destroy_thread_local(GC_tlfs p)
 #   ifdef GC_GCJ_SUPPORT
         return_freelists(p -> gcj_freelists, (void **)GC_gcjobjfreelist);
 #   endif
+}
+
+STATIC void *GC_get_tlfs(void)
+{
+# if !defined(USE_PTHREAD_SPECIFIC) && !defined(USE_WIN32_SPECIFIC)
+    GC_key_t k = GC_thread_key;
+
+    if (EXPECT(0 == k, FALSE)) {
+      /* We have not yet run GC_init_parallel.  That means we also  */
+      /* are not locking, so GC_malloc_kind_global is fairly cheap. */
+      return NULL;
+    }
+    return GC_getspecific(k);
+# else
+    if (EXPECT(!keys_initialized, FALSE)) return NULL;
+
+    return GC_getspecific(GC_thread_key);
+# endif
 }
 
 GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_kind(size_t bytes, int kind)
@@ -156,30 +173,13 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_kind(size_t bytes, int kind)
         return GC_malloc_kind_global(bytes, kind);
       }
 #   endif
-#   if !defined(USE_PTHREAD_SPECIFIC) && !defined(USE_WIN32_SPECIFIC)
-    {
-      GC_key_t k = GC_thread_key;
-
-      if (EXPECT(0 == k, FALSE)) {
-        /* We haven't yet run GC_init_parallel.  That means     */
-        /* we also aren't locking, so this is fairly cheap.     */
+    tsd = GC_get_tlfs();
+    if (EXPECT(NULL == tsd, FALSE)) {
         return GC_malloc_kind_global(bytes, kind);
-      }
-      tsd = GC_getspecific(k);
     }
-#   else
-      if (!EXPECT(keys_initialized, TRUE))
-        return GC_malloc_kind_global(bytes, kind);
-      tsd = GC_getspecific(GC_thread_key);
-#   endif
-#   if !defined(USE_COMPILER_TLS) && !defined(USE_WIN32_COMPILER_TLS)
-      if (EXPECT(0 == tsd, FALSE)) {
-        return GC_malloc_kind_global(bytes, kind);
-      }
-#   endif
     GC_ASSERT(GC_is_initialized);
     GC_ASSERT(GC_is_thread_tsd_valid(tsd));
-    granules = ROUNDED_UP_GRANULES(bytes);
+    granules = ALLOC_REQUEST_GRANS(bytes);
 #   if defined(CPPCHECK)
 #     define MALLOC_KIND_PTRFREE_INIT (void*)1
 #   else
@@ -226,9 +226,9 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_gcj_malloc(size_t bytes,
                                     void * ptr_to_struct_containing_descr)
 {
   if (EXPECT(GC_incremental, FALSE)) {
-    return GC_core_gcj_malloc(bytes, ptr_to_struct_containing_descr);
+    return GC_core_gcj_malloc(bytes, ptr_to_struct_containing_descr, 0);
   } else {
-    size_t granules = ROUNDED_UP_GRANULES(bytes);
+    size_t granules = ALLOC_REQUEST_GRANS(bytes);
     void *result;
     void **tiny_fl;
 
@@ -237,7 +237,8 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_gcj_malloc(size_t bytes,
     GC_FAST_MALLOC_GRANS(result, granules, tiny_fl, DIRECT_GRANULES,
                          GC_gcj_kind,
                          GC_core_gcj_malloc(bytes,
-                                            ptr_to_struct_containing_descr),
+                                            ptr_to_struct_containing_descr,
+                                            0 /* flags */),
                          {AO_compiler_barrier();
                           *(void **)result = ptr_to_struct_containing_descr;});
         /* This forces the initialization of the "method ptr".          */

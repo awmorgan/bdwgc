@@ -14,7 +14,7 @@
 # Info (current:revision:age) for the Libtool versioning system.
 # These numbers should be updated at most once just before the release,
 # and, optionally, at most once during the development (after the release).
-LIBGC_VER_INFO = 6:0:5
+LIBGC_VER_INFO = 6:1:5
 LIBGCCPP_VER_INFO = 6:0:5
 
 ## FIXME: `make distcheck' in this directory will not currently work.
@@ -70,22 +70,24 @@ libgc_la_SOURCES = \
 # C Library: Architecture Dependent
 # ---------------------------------
 
+if THREADS
+
+libgc_la_SOURCES += pthread_start.c pthread_support.c
+
+if THREAD_LOCAL_ALLOC
+libgc_la_SOURCES += thread_local_alloc.c
+endif
+
 if WIN32_THREADS
 libgc_la_SOURCES += win32_threads.c
 else
-if PTHREADS
-# Not Cygwin or MinGW.
-libgc_la_SOURCES += pthread_start.c pthread_support.c
 if DARWIN_THREADS
 libgc_la_SOURCES += darwin_stop_world.c
 else
 libgc_la_SOURCES += pthread_stop_world.c
 endif
 endif
-endif
 
-if THREAD_LOCAL_ALLOC
-libgc_la_SOURCES += thread_local_alloc.c
 endif
 
 if MAKE_BACK_GRAPH
@@ -212,40 +214,48 @@ include tests/tests.am
 if ENABLE_DOCS
 dist_doc_DATA = \
     AUTHORS \
+    ChangeLog \
     LICENSE \
-    README.md \
-    doc/README.DGUX386 \
-    doc/README.Mac \
-    doc/README.OS2 \
-    doc/README.aix \
-    doc/README.amiga \
-    doc/README.arm.cross \
-    doc/README.autoconf \
-    doc/README.cmake \
-    doc/README.cords \
-    doc/README.darwin \
-    doc/README.emscripten \
-    doc/README.environment \
-    doc/README.ews4800 \
-    doc/README.hp \
-    doc/README.linux \
-    doc/README.macros \
-    doc/README.sgi \
-    doc/README.solaris2 \
-    doc/README.symbian \
-    doc/README.uts \
-    doc/README.win32 \
-    doc/README.win64 \
-    doc/debugging.md \
-    doc/finalization.md \
-    doc/gcdescr.md \
-    doc/gcinterface.md \
-    doc/leak.md \
-    doc/overview.md \
-    doc/porting.md \
-    doc/scale.md \
-    doc/simple_example.md \
-    doc/tree.md
+    README.md
+
+docdocsdir = $(docdir)/docs
+dist_docdocs_DATA = \
+    docs/README.autoconf \
+    docs/README.cmake \
+    docs/README.cords \
+    docs/README.environment \
+    docs/README.macros \
+    docs/debugging.md \
+    docs/faq.md \
+    docs/finalization.md \
+    docs/gcdescr.md \
+    docs/gcinterface.md \
+    docs/leak.md \
+    docs/overview.md \
+    docs/porting.md \
+    docs/scale.md \
+    docs/simple_example.md \
+    docs/tree.md
+
+docdocsplatformsdir = $(docdocsdir)/platforms
+dist_docdocsplatforms_DATA = \
+    docs/platforms/README.aix \
+    docs/platforms/README.amiga \
+    docs/platforms/README.arm_cross \
+    docs/platforms/README.darwin \
+    docs/platforms/README.dgux386 \
+    docs/platforms/README.emscripten \
+    docs/platforms/README.ews4800 \
+    docs/platforms/README.hp \
+    docs/platforms/README.linux \
+    docs/platforms/README.mac \
+    docs/platforms/README.os2 \
+    docs/platforms/README.sgi \
+    docs/platforms/README.solaris2 \
+    docs/platforms/README.symbian \
+    docs/platforms/README.uts \
+    docs/platforms/README.win32 \
+    docs/platforms/README.win64
 
 dist_man3_MANS = gc.man
 endif

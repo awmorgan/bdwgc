@@ -20,7 +20,7 @@ environment:
     CMAKE_CONFIG: Release
     CMAKE_OPTIONS: -DCMAKE_BUILD_TYPE=MinSizeRel -Denable_parallel_mark=OFF
   - TARGET: cmake
-    CMAKE_OPTIONS: -Denable_gc_assertions=ON -Denable_thread_local_alloc=OFF
+    CMAKE_OPTIONS: -Denable_gc_assertions=ON -Denable_thread_local_alloc=OFF -Ddisable_single_obj_compilation=ON
   - TARGET: cmake
     CFLAGS_EXTRA: -DGC_DISABLE_INCREMENTAL
     CMAKE_OPTIONS: -Denable_gc_assertions=ON -Denable_gcj_support=OFF -Denable_parallel_mark=OFF -Denable_thread_local_alloc=OFF
@@ -51,7 +51,7 @@ environment:
   - TARGET: mingw
     CFLAGS_EXTRA: -D GC_THREADS -D THREAD_LOCAL_ALLOC -D PARALLEL_MARK -D GC_ASSERTIONS -D EMPTY_GETENV_RESULTS -D GC_GCJ_SUPPORT -D USE_MUNMAP -D LARGE_CONFIG -D NO_MSGBOX_ON_ERROR
   - TARGET: mingw
-    CFLAGS_EXTRA: -O3 -march=native -D GC_THREADS -D GC_GCJ_SUPPORT -D GC_TIME_LIMIT=10 -D WINXP_USE_PERF_COUNTER -D NO_MSGBOX_ON_ERROR
+    CFLAGS_EXTRA: -O3 -march=native -D GC_THREADS -D GC_GCJ_SUPPORT -D GC_TIME_LIMIT=10 -D WINXP_USE_PERF_COUNTER -D NO_MSGBOX_ON_ERROR -D NO_TEST_ENDTHREADEX
   - TARGET: mingw-shared-no-make
     CFLAGS_EXTRA: -D GC_THREADS -D GC_ASSERTIONS -D ENABLE_DISCLAIM -D GC_GCJ_SUPPORT -D GC_PREFER_MPROTECT_VDB -D GC_CALL=__stdcall -D GC_CALLBACK=__fastcall -D CONSOLE_LOG -D NO_MSGBOX_ON_ERROR
   - TARGET: wcc
@@ -78,7 +78,7 @@ environment:
     CONF_OPTIONS: --enable-cplusplus
     CFLAGS_EXTRA: -D GCTEST_PRINT_VERBOSE
   - TARGET: cygwin
-    CONF_OPTIONS: --enable-cplusplus --disable-munmap --enable-gc-assertions
+    CONF_OPTIONS: --enable-cplusplus --disable-munmap --enable-gc-assertions --enable-redirect-malloc
   - TARGET: cygwin64
     CFLAGS_EXTRA: -D GC_ALWAYS_MULTITHREADED -D LINT2 -D TEST_MANUAL_VDB
     CONF_OPTIONS: --enable-cplusplus --enable-gc-assertions --disable-shared
@@ -128,8 +128,8 @@ build_script:
       "cd /c/projects/bdwgc
        && make -j -f Makefile.direct CC=gcc CFLAGS_EXTRA='-Werror -Wall -Wextra -Wpedantic %CFLAGS_EXTRA%'" )
 - cmd: if [%TARGET%]==[wcc] (
-    appveyor DownloadFile "https://master.dl.sourceforge.net/project/openwatcom/open-watcom-2.0-2017-11-01/ow-snapshot.7z"
-    && 7z x -o..\watcom ow-snapshot.7z > nul
+    appveyor DownloadFile "https://github.com/open-watcom/open-watcom-v2/releases/download/2023-05-09-Build/ow-snapshot.tar.xz"
+    && 7z x ow-snapshot.tar.xz > nul && 7z x -o..\watcom ow-snapshot.tar > nul
     && set "watcom=%cd%\..\watcom" && set "path=%cd%\..\watcom\binnt64"
     && set "include=%cd%\..\watcom\h\%WCC_INC_SUBDIR%;%cd%\..\watcom\h"
     && wmake -f WCC_MAKEFILE SYSTEM=%WCC_SYSTEM% %ENABLE_STATIC_OPT% CFLAGS_EXTRA="-we %CFLAGS_EXTRA%" )

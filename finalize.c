@@ -91,7 +91,7 @@ GC_API void GC_CALL GC_push_finalizer_structures(void)
 /* current size.  May be a no-op.  *table is a pointer to an array of   */
 /* hash headers.  We update both *table and *log_size_ptr on success.   */
 STATIC void GC_grow_table(struct hash_chain_entry ***table,
-                          unsigned *log_size_ptr, word *entries_ptr)
+                          unsigned *log_size_ptr, const word *entries_ptr)
 {
     word i;
     struct hash_chain_entry *p;
@@ -164,7 +164,6 @@ STATIC int GC_register_disappearing_link_inner(
     struct disappearing_link *curr_dl;
     size_t index;
     struct disappearing_link * new_dl;
-    DCL_LOCK_STATE;
 
     GC_ASSERT(GC_is_initialized);
     if (EXPECT(GC_find_leak, FALSE)) return GC_UNIMPLEMENTED;
@@ -278,7 +277,6 @@ GC_INLINE struct disappearing_link *GC_unregister_disappearing_link_inner(
 GC_API int GC_CALL GC_unregister_disappearing_link(void * * link)
 {
     struct disappearing_link *curr_dl;
-    DCL_LOCK_STATE;
 
     if (((word)link & (ALIGNMENT-1)) != 0) return 0; /* Nothing to do. */
 
@@ -396,8 +394,6 @@ GC_INLINE void GC_complete_ongoing_collection(void) {
 
   GC_API void GC_CALL GC_set_toggleref_func(GC_toggleref_func fn)
   {
-    DCL_LOCK_STATE;
-
     LOCK();
     GC_toggleref_callback = fn;
     UNLOCK();
@@ -406,7 +402,6 @@ GC_INLINE void GC_complete_ongoing_collection(void) {
   GC_API GC_toggleref_func GC_CALL GC_get_toggleref_func(void)
   {
     GC_toggleref_func fn;
-    DCL_LOCK_STATE;
 
     LOCK();
     fn = GC_toggleref_callback;
@@ -453,7 +448,6 @@ GC_INLINE void GC_complete_ongoing_collection(void) {
   GC_API int GC_CALL GC_toggleref_add(void *obj, int is_strong_ref)
   {
     int res = GC_SUCCESS;
-    DCL_LOCK_STATE;
 
     GC_ASSERT(NONNULL_ARG_NOT_NULL(obj));
     LOCK();
@@ -478,8 +472,6 @@ STATIC GC_await_finalize_proc GC_object_finalized_proc = 0;
 
 GC_API void GC_CALL GC_set_await_finalize_proc(GC_await_finalize_proc fn)
 {
-  DCL_LOCK_STATE;
-
   LOCK();
   GC_object_finalized_proc = fn;
   UNLOCK();
@@ -488,7 +480,6 @@ GC_API void GC_CALL GC_set_await_finalize_proc(GC_await_finalize_proc fn)
 GC_API GC_await_finalize_proc GC_CALL GC_get_await_finalize_proc(void)
 {
   GC_await_finalize_proc fn;
-  DCL_LOCK_STATE;
 
   LOCK();
   fn = GC_object_finalized_proc;
@@ -508,7 +499,6 @@ GC_API GC_await_finalize_proc GC_CALL GC_get_await_finalize_proc(void)
   GC_API int GC_CALL GC_unregister_long_link(void * * link)
   {
     struct disappearing_link *curr_dl;
-    DCL_LOCK_STATE;
 
     if (((word)link & (ALIGNMENT-1)) != 0) return 0; /* Nothing to do. */
 
@@ -581,7 +571,6 @@ GC_API GC_await_finalize_proc GC_CALL GC_get_await_finalize_proc(void)
   GC_API int GC_CALL GC_move_disappearing_link(void **link, void **new_link)
   {
     int result;
-    DCL_LOCK_STATE;
 
     if (((word)new_link & (ALIGNMENT-1)) != 0
         || !NONNULL_ARG_NOT_NULL(new_link))
@@ -599,7 +588,6 @@ GC_API GC_await_finalize_proc GC_CALL GC_get_await_finalize_proc(void)
     GC_API int GC_CALL GC_move_long_link(void **link, void **new_link)
     {
       int result;
-      DCL_LOCK_STATE;
 
       if (((word)new_link & (ALIGNMENT-1)) != 0
           || !NONNULL_ARG_NOT_NULL(new_link))
@@ -619,7 +607,7 @@ GC_API GC_await_finalize_proc GC_CALL GC_get_await_finalize_proc(void)
 /* overflow is handled by the caller, and is not a disaster.            */
 #if defined(_MSC_VER) && defined(I386)
   GC_ATTR_NOINLINE
-  /* Otherwise some optimizer bug is tickled in VC for X86 (v19, at least). */
+  /* Otherwise some optimizer bug is tickled in VC for x86 (v19, at least). */
 #endif
 STATIC void GC_normal_finalize_mark_proc(ptr_t p)
 {
@@ -654,7 +642,10 @@ STATIC void GC_ignore_self_finalize_mark_proc(ptr_t p)
     }
 }
 
-STATIC void GC_null_finalize_mark_proc(ptr_t p GC_ATTR_UNUSED) {}
+STATIC void GC_null_finalize_mark_proc(ptr_t p)
+{
+    UNUSED_ARG(p);
+}
 
 /* Possible finalization_marker procedures.  Note that mark stack       */
 /* overflow is handled by the caller, and is not a disaster.            */
@@ -666,8 +657,17 @@ STATIC void GC_null_finalize_mark_proc(ptr_t p GC_ATTR_UNUSED) {}
 /* other objects specify no ordering.                                   */
 STATIC void GC_unreachable_finalize_mark_proc(ptr_t p)
 {
+    /* A dummy comparison to ensure the compiler not to optimize two    */
+    /* identical functions into a single one (thus, to ensure a unique  */
+    /* address of each).  Alternatively, GC_noop1(p) could be used.     */
+    if (EXPECT(NULL == p, FALSE)) return;
+
     GC_normal_finalize_mark_proc(p);
 }
+
+static GC_bool need_unreachable_finalization = FALSE;
+        /* Avoid the work if this is not used.  */
+        /* TODO: turn need_unreachable_finalization into a counter */
 
 /* Register a finalization function.  See gc.h for details.     */
 /* The last parameter is a procedure that determines            */
@@ -683,7 +683,6 @@ STATIC void GC_register_finalizer_inner(void * obj,
     size_t index;
     struct finalizable_object *new_fo = 0;
     hdr *hhdr = NULL; /* initialized to prevent warning. */
-    DCL_LOCK_STATE;
 
     GC_ASSERT(GC_is_initialized);
     if (EXPECT(GC_find_leak, FALSE)) {
@@ -692,6 +691,8 @@ STATIC void GC_register_finalizer_inner(void * obj,
     }
     LOCK();
     GC_ASSERT(obj != NULL && GC_base_C(obj) == obj);
+    if (mp == GC_unreachable_finalize_mark_proc)
+        need_unreachable_finalization = TRUE;
     if (EXPECT(NULL == GC_fnlz_roots.fo_head, FALSE)
         || EXPECT(GC_fo_entries > ((word)1 << GC_log_fo_table_size), FALSE)) {
         GC_grow_table((struct hash_chain_entry ***)&GC_fnlz_roots.fo_head,
@@ -833,14 +834,10 @@ GC_API void GC_CALL GC_register_finalizer_no_order(void * obj,
                                 ocd, GC_null_finalize_mark_proc);
 }
 
-static GC_bool need_unreachable_finalization = FALSE;
-        /* Avoid the work if this isn't used.   */
-
 GC_API void GC_CALL GC_register_finalizer_unreachable(void * obj,
                                GC_finalization_proc fn, void * cd,
                                GC_finalization_proc *ofn, void ** ocd)
 {
-    need_unreachable_finalization = TRUE;
     GC_ASSERT(GC_java_finalization);
     GC_register_finalizer_inner(obj, fn, cd, ofn,
                                 ocd, GC_unreachable_finalize_mark_proc);
@@ -1153,6 +1150,11 @@ GC_INNER void GC_finalize(void)
   }
 }
 
+/* Count of finalizers to run, at most, during a single invocation      */
+/* of GC_invoke_finalizers(); zero means no limit.  Accessed with the   */
+/* allocation lock held.                                                */
+STATIC unsigned GC_interrupt_finalizers = 0;
+
 #ifndef JAVA_FINALIZATION_NOT_NEEDED
 
   /* Enqueue all remaining finalizers to be run.        */
@@ -1210,11 +1212,10 @@ GC_INNER void GC_finalize(void)
    */
   GC_API void GC_CALL GC_finalize_all(void)
   {
-    DCL_LOCK_STATE;
-
     LOCK();
     while (GC_fo_entries > 0) {
       GC_enqueue_all_finalizers();
+      GC_interrupt_finalizers = 0; /* reset */
       UNLOCK();
       GC_invoke_finalizers();
       /* Running the finalizers in this thread is arguably not a good   */
@@ -1227,6 +1228,23 @@ GC_INNER void GC_finalize(void)
   }
 
 #endif /* !JAVA_FINALIZATION_NOT_NEEDED */
+
+GC_API void GC_CALL GC_set_interrupt_finalizers(unsigned value)
+{
+  LOCK();
+  GC_interrupt_finalizers = value;
+  UNLOCK();
+}
+
+GC_API unsigned GC_CALL GC_get_interrupt_finalizers(void)
+{
+  unsigned value;
+
+  LOCK();
+  value = GC_interrupt_finalizers;
+  UNLOCK();
+  return value;
+}
 
 /* Returns true if it is worth calling GC_invoke_finalizers. (Useful if */
 /* finalizers can only be called from some kind of "safe state" and     */
@@ -1245,28 +1263,29 @@ GC_API int GC_CALL GC_invoke_finalizers(void)
 {
     int count = 0;
     word bytes_freed_before = 0; /* initialized to prevent warning. */
-    DCL_LOCK_STATE;
 
     GC_ASSERT(I_DONT_HOLD_LOCK());
     while (GC_should_invoke_finalizers()) {
         struct finalizable_object * curr_fo;
 
-#       ifdef THREADS
-            LOCK();
-#       endif
+        LOCK();
         if (count == 0) {
             bytes_freed_before = GC_bytes_freed;
             /* Don't do this outside, since we need the lock. */
+        } else if (EXPECT(GC_interrupt_finalizers != 0, FALSE)
+                   && (unsigned)count >= GC_interrupt_finalizers) {
+            UNLOCK();
+            break;
         }
         curr_fo = GC_fnlz_roots.finalize_now;
 #       ifdef THREADS
-            if (curr_fo != NULL)
-                SET_FINALIZE_NOW(fo_next(curr_fo));
-            UNLOCK();
-            if (curr_fo == 0) break;
-#       else
-            GC_fnlz_roots.finalize_now = fo_next(curr_fo);
+            if (EXPECT(NULL == curr_fo, FALSE)) {
+                UNLOCK();
+                break;
+            }
 #       endif
+        SET_FINALIZE_NOW(fo_next(curr_fo));
+        UNLOCK();
         fo_set_next(curr_fo, 0);
         (*(curr_fo -> fo_fn))((ptr_t)(curr_fo -> fo_hidden_base),
                               curr_fo -> fo_client_data);
@@ -1301,7 +1320,6 @@ GC_INNER void GC_notify_or_invoke_finalizers(void)
 #   if defined(KEEP_BACK_PTRS) || defined(MAKE_BACK_GRAPH)
       static word last_back_trace_gc_no = 1;    /* Skip first one. */
 #   endif
-    DCL_LOCK_STATE;
 
 #   if defined(THREADS) && !defined(KEEP_BACK_PTRS) \
        && !defined(MAKE_BACK_GRAPH)
@@ -1346,14 +1364,23 @@ GC_INNER void GC_notify_or_invoke_finalizers(void)
     }
 
     if (!GC_finalize_on_demand) {
-      unsigned char *pnested = GC_check_finalizer_nested();
+      unsigned char *pnested;
+
+#     ifdef THREADS
+        if (EXPECT(GC_in_thread_creation, FALSE)) {
+          UNLOCK();
+          return;
+        }
+#     endif
+      pnested = GC_check_finalizer_nested();
       UNLOCK();
-      /* Skip GC_invoke_finalizers() if nested */
+      /* Skip GC_invoke_finalizers() if nested. */
       if (pnested != NULL) {
-        (void) GC_invoke_finalizers();
-        *pnested = 0; /* Reset since no more finalizers. */
+        (void)GC_invoke_finalizers();
+        *pnested = 0; /* Reset since no more finalizers or interrupted. */
 #       ifndef THREADS
-          GC_ASSERT(NULL == GC_fnlz_roots.finalize_now);
+          GC_ASSERT(NULL == GC_fnlz_roots.finalize_now
+                    || GC_interrupt_finalizers > 0);
 #       endif   /* Otherwise GC can run concurrently and add more */
       }
       return;

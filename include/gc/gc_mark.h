@@ -87,7 +87,7 @@ typedef struct GC_ms_entry * (*GC_mark_proc)(GC_word * /* addr */,
 /* bits are tags distinguishing among the following 4 possibilities     */
 /* for the high order 30 bits.                                          */
 #define GC_DS_TAG_BITS 2
-#define GC_DS_TAGS   ((1 << GC_DS_TAG_BITS) - 1)
+#define GC_DS_TAGS   ((1U << GC_DS_TAG_BITS) - 1)
 #define GC_DS_LENGTH 0  /* The entire word is a length in bytes that    */
                         /* must be a multiple of 4.                     */
 #define GC_DS_BITMAP 1  /* 30 (62) bits are a bitmap describing pointer */
@@ -104,8 +104,9 @@ typedef struct GC_ms_entry * (*GC_mark_proc)(GC_word * /* addr */,
                         /* PROC(descr).  ENV(descr) is passed as the    */
                         /* last argument.                               */
 #define GC_MAKE_PROC(proc_index, env) \
-            (((((env) << GC_LOG_MAX_MARK_PROCS) \
-               | (proc_index)) << GC_DS_TAG_BITS) | GC_DS_PROC)
+            ((((((GC_word)(env)) << GC_LOG_MAX_MARK_PROCS) \
+               | (unsigned)(proc_index)) << GC_DS_TAG_BITS) \
+             | (GC_word)GC_DS_PROC)
 #define GC_DS_PER_OBJECT 3  /* The real descriptor is at the            */
                         /* byte displacement from the beginning of the  */
                         /* object given by descr & ~GC_DS_TAGS.         */
@@ -125,10 +126,13 @@ typedef struct GC_ms_entry * (*GC_mark_proc)(GC_word * /* addr */,
 
 GC_API void * GC_least_plausible_heap_addr;
 GC_API void * GC_greatest_plausible_heap_addr;
-                        /* Bounds on the heap.  Guaranteed valid        */
+                        /* Bounds on the heap.  Guaranteed to be valid. */
                         /* Likely to include future heap expansion.     */
                         /* Hence usually includes not-yet-mapped        */
-                        /* memory.                                      */
+                        /* memory, or might overlap with other data     */
+                        /* roots.  The address of any heap object is    */
+                        /* larger than GC_least_plausible_heap_addr and */
+                        /* less than GC_greatest_plausible_heap_addr.   */
 
 /* Handle nested references in a custom mark procedure.                 */
 /* Check if obj is a valid object. If so, ensure that it is marked.     */
@@ -155,8 +159,8 @@ GC_API struct GC_ms_entry * GC_CALL GC_mark_and_push(void * /* obj */,
                                 void ** /* src */);
 
 #define GC_MARK_AND_PUSH(obj, msp, lim, src) \
-          ((GC_word)(obj) >= (GC_word)GC_least_plausible_heap_addr && \
-           (GC_word)(obj) <= (GC_word)GC_greatest_plausible_heap_addr ? \
+          ((GC_word)(obj) > (GC_word)GC_least_plausible_heap_addr \
+           && (GC_word)(obj) < (GC_word)GC_greatest_plausible_heap_addr ? \
            GC_mark_and_push(obj, msp, lim, src) : (msp))
 
 /* The size of the header added to objects allocated through the        */
@@ -256,7 +260,7 @@ GC_API GC_ATTR_MALLOC GC_ATTR_ALLOC_SIZE(1) void * GC_CALL
                                         GC_generic_malloc_ignore_off_page(
                                             size_t /* lb */, int /* knd */);
                                 /* As above, but pointers to past the   */
-                                /* first page of the resulting object   */
+                                /* first hblk of the resulting object   */
                                 /* are ignored.                         */
 
 /* Generalized version of GC_malloc_[atomic_]uncollectable.     */
@@ -327,7 +331,7 @@ GC_API void GC_CALL GC_set_start_callback(GC_start_callback_proc);
 GC_API GC_start_callback_proc GC_CALL GC_get_start_callback(void);
 
 /* Slow/general mark bit manipulation.  The caller should hold the      */
-/* allocation lock.  GC_is_marked returns 1 (TRUE) or 0.  The argument  */
+/* allocation lock.  GC_is_marked returns 1 (true) or 0.  The argument  */
 /* should be the real address of an object (i.e. the address of the     */
 /* debug header if there is one).                                       */
 GC_API int GC_CALL GC_is_marked(const void *) GC_ATTR_NONNULL(1);
@@ -362,10 +366,22 @@ GC_API void GC_CALL GC_enumerate_reachable_objects_inner(
                                 GC_reachable_object_proc,
                                 void * /* client_data */) GC_ATTR_NONNULL(1);
 
+/* Is the given address in one of the temporary static root sections?   */
+/* Acquires the GC lock.                                                */
 GC_API int GC_CALL GC_is_tmp_root(void *);
 
 GC_API void GC_CALL GC_print_trace(GC_word /* gc_no */);
 GC_API void GC_CALL GC_print_trace_inner(GC_word /* gc_no */);
+
+/* Set the client for when mark stack is empty.  A client can use       */
+/* this callback to process (un)marked objects and push additional      */
+/* work onto the stack.  Useful for implementing ephemerons.            */
+/* Both the setter and getter acquire the GC lock.                      */
+typedef struct GC_ms_entry *(GC_CALLBACK *GC_on_mark_stack_empty_proc)(
+                                struct GC_ms_entry* /* mark_stack_ptr */,
+                                struct GC_ms_entry* /* mark_stack_limit */);
+GC_API void GC_CALL GC_set_on_mark_stack_empty(GC_on_mark_stack_empty_proc);
+GC_API GC_on_mark_stack_empty_proc GC_CALL GC_get_on_mark_stack_empty(void);
 
 #ifdef __cplusplus
   } /* extern "C" */

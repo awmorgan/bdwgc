@@ -224,7 +224,8 @@ GC_INLINE mse * GC_push_obj(ptr_t obj, hdr * hhdr, mse * mark_stack_top,
 # define TRACE(source, cmd) \
         if (GC_trace_addr != 0 && (ptr_t)(source) == GC_trace_addr) cmd
 # define TRACE_TARGET(target, cmd) \
-        if (GC_trace_addr != 0 && (target) == *(ptr_t *)GC_trace_addr) cmd
+        if (GC_trace_addr != NULL && GC_is_heap_ptr(GC_trace_addr) \
+            && (target) == *(ptr_t *)GC_trace_addr) cmd
 #else
 # define TRACE(source, cmd)
 # define TRACE_TARGET(source, cmd)
@@ -293,7 +294,7 @@ GC_INLINE mse * GC_push_contents_hdr(ptr_t current, mse * mark_stack_top,
         size_t obj_displ;
 
         base = (ptr_t)hhdr->hb_block;
-        obj_displ = current - base;
+        obj_displ = (size_t)(current - base);
         if (obj_displ != displ) {
           GC_ASSERT(obj_displ < hhdr -> hb_sz);
           /* Must be in all_interior_pointer case, not first block      */
@@ -379,12 +380,12 @@ GC_INLINE mse * GC_push_contents_hdr(ptr_t current, mse * mark_stack_top,
     /* Try both the raw version and the fixed up one.   */
 # define GC_PUSH_ONE_STACK(p, source) \
     do { \
-      if ((word)(p) >= (word)GC_least_plausible_heap_addr \
+      if ((word)(p) > (word)GC_least_plausible_heap_addr \
           && (word)(p) < (word)GC_greatest_plausible_heap_addr) { \
          PUSH_ONE_CHECKED_STACK(p, source); \
       } \
       FIXUP_POINTER(p); \
-      if ((word)(p) >= (word)GC_least_plausible_heap_addr \
+      if ((word)(p) > (word)GC_least_plausible_heap_addr \
           && (word)(p) < (word)GC_greatest_plausible_heap_addr) { \
          PUSH_ONE_CHECKED_STACK(p, source); \
       } \
@@ -392,7 +393,7 @@ GC_INLINE mse * GC_push_contents_hdr(ptr_t current, mse * mark_stack_top,
 #else /* !NEED_FIXUP_POINTER */
 # define GC_PUSH_ONE_STACK(p, source) \
     do { \
-      if ((word)(p) >= (word)GC_least_plausible_heap_addr \
+      if ((word)(p) > (word)GC_least_plausible_heap_addr \
           && (word)(p) < (word)GC_greatest_plausible_heap_addr) { \
          PUSH_ONE_CHECKED_STACK(p, source); \
       } \
@@ -403,7 +404,7 @@ GC_INLINE mse * GC_push_contents_hdr(ptr_t current, mse * mark_stack_top,
 #define GC_PUSH_ONE_HEAP(p,source,mark_stack_top) \
     do { \
       FIXUP_POINTER(p); \
-      if ((word)(p) >= (word)GC_least_plausible_heap_addr \
+      if ((word)(p) > (word)GC_least_plausible_heap_addr \
           && (word)(p) < (word)GC_greatest_plausible_heap_addr) \
         mark_stack_top = GC_mark_and_push((void *)(p), mark_stack_top, \
                                 GC_mark_stack_limit, (void * *)(source)); \

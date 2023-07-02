@@ -23,14 +23,14 @@
 #if !defined(_M_ARM) && !defined(_M_ARM64) \
     && !defined(_M_X64) && defined(_MSC_VER)
 
-/* TODO: arm[64], x86_64 currently miss some machine-dependent code below.  */
+/* TODO: arm[64], x64 currently miss some machine-dependent code below.     */
 /* See also GC_HAVE_BUILTIN_BACKTRACE in gc_config_macros.h.                */
 
 #include <stdio.h>
 #include <stdlib.h>
 
 #define GC_BUILD
-#include "gc.h"
+#include "gc/gc.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 # define WIN32_LEAN_AND_MEAN 1
@@ -81,9 +81,7 @@ static HANDLE GetSymHandle(void)
     BOOL bRet = SymInitialize(symHandle = GetCurrentProcess(), NULL, FALSE);
     if (bRet) {
       DWORD dwOptions = SymGetOptions();
-      dwOptions &= ~SYMOPT_UNDNAME;
-      dwOptions |= SYMOPT_LOAD_LINES;
-      SymSetOptions(dwOptions);
+      SymSetOptions((dwOptions & ~(DWORD)SYMOPT_UNDNAME) | SYMOPT_LOAD_LINES);
     }
   }
   return symHandle;
@@ -276,7 +274,7 @@ static size_t GetFileLineFromAddress(void* address, char* fileName,
                                      size_t* offsetBytes)
 {
   char* sourceName;
-  IMAGEHLP_LINE line = { sizeof (line) };
+  IMAGEHLP_LINE line = { sizeof(line) };
   GC_ULONG_PTR dwOffset = 0;
 
   if (size) *fileName = 0;
@@ -368,7 +366,7 @@ static size_t GetDescriptionFromStack(void* const frames[], size_t count,
   return buffer - begin;
 }
 
-/* Compatibility with <execinfo.h> */
+/* Compatibility with execinfo.h:       */
 
 int backtrace(void* addresses[], int count)
 {

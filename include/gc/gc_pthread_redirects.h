@@ -61,6 +61,8 @@
         || (_POSIX_C_SOURCE >= 199506L) || (_XOPEN_SOURCE >= 500)
       GC_API int GC_pthread_sigmask(int /* how */, const sigset_t *,
                                     sigset_t * /* oset */);
+#   else
+#     define GC_NO_PTHREAD_SIGMASK
 #   endif
 # endif /* !GC_NO_PTHREAD_SIGMASK */
 
@@ -92,7 +94,7 @@
 
 #if !defined(GC_NO_THREAD_REDIRECTS) && !defined(GC_USE_LD_WRAP)
   /* Unless the compiler supports #pragma extern_prefix, the Tru64      */
-  /* UNIX <pthread.h> redefines some POSIX thread functions to use      */
+  /* UNIX pthread.h redefines some POSIX thread functions to use        */
   /* mangled names.  Anyway, it's safe to undef them before redefining. */
 # undef pthread_create
 # undef pthread_join

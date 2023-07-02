@@ -68,7 +68,7 @@ GC_INNER hdr *
         if (hhdr -> hb_flags & IGNORE_OFF_PAGE)
             return 0;
         if (HBLK_IS_FREE(hhdr)
-            || p - current >= (ptrdiff_t)(hhdr->hb_sz)) {
+            || p - current >= (ptrdiff_t)(hhdr -> hb_sz)) {
             GC_ADD_TO_BLACK_LIST_NORMAL(p, source);
             /* Pointer past the end of the block */
             return 0;
@@ -140,7 +140,7 @@ GC_INNER ptr_t GC_scratch_alloc(size_t bytes)
         result = (ptr_t)GET_MEM(bytes_to_get);
         if (EXPECT(NULL == result, FALSE)) {
             WARN("Out of memory - trying to allocate requested amount"
-                 " (%" WARN_PRIdPTR " bytes)...\n", (word)bytes);
+                 " (%" WARN_PRIuPTR " bytes)...\n", bytes);
             bytes_to_get = ROUNDUP_PAGESIZE_IF_MMAP(bytes);
             result = (ptr_t)GET_MEM(bytes_to_get);
             if (result != NULL) {
@@ -180,7 +180,7 @@ static hdr * alloc_hdr(void)
 
 GC_INLINE void free_hdr(hdr * hhdr)
 {
-    hhdr -> hb_next = (struct hblk *) GC_hdr_free_list;
+    hhdr -> hb_next = (struct hblk *)GC_hdr_free_list;
     GC_hdr_free_list = hhdr;
 }
 
@@ -294,7 +294,7 @@ GC_INNER GC_bool GC_install_counts(struct hblk *h, size_t sz/* bytes */)
     if (!get_index((word)h + sz - 1))
         return FALSE;
     for (hbp = h + 1; (word)hbp < (word)h + sz; hbp += 1) {
-        word i = HBLK_PTR_DIFF(hbp, h);
+        word i = (word)HBLK_PTR_DIFF(hbp, h);
 
         SET_HDR(hbp, (hdr *)(i > MAX_JUMP? MAX_JUMP : i));
     }
@@ -414,7 +414,7 @@ GC_INNER struct hblk * GC_prev_block(struct hblk *h)
             } else if (IS_FORWARDING_ADDR_OR_NIL(hhdr)) {
                 j -= (signed_word)hhdr;
             } else {
-                return (struct hblk *)(((bi -> key << LOG_BOTTOM_SZ) + j)
+                return (struct hblk*)(((bi -> key << LOG_BOTTOM_SZ) + (word)j)
                                        << LOG_HBLKSIZE);
             }
         }

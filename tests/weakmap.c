@@ -26,13 +26,11 @@
 #undef GC_NO_THREAD_REDIRECTS
 #include "gc/gc_disclaim.h" /* includes gc.h */
 
-#if defined(GC_PTHREADS) || defined(LINT2)
-# define NOT_GCBUILD
-# include "private/gc_priv.h"
-# undef rand
-  static GC_RAND_STATE_T seed; /* concurrent update does not hurt the test */
-# define rand() GC_RAND_NEXT(&seed)
-#endif /* GC_PTHREADS || LINT2 */
+#define NOT_GCBUILD
+#include "private/gc_priv.h"
+#undef rand
+static GC_RAND_STATE_T seed; /* concurrent update does not hurt the test */
+#define rand() GC_RAND_NEXT(&seed)
 
 #include "gc/gc_mark.h" /* should not precede include gc_priv.h */
 
@@ -46,7 +44,9 @@
 #else
 # undef NTHREADS
 # define NTHREADS 0
-# define AO_t GC_word
+# ifndef AO_HAVE_compiler_barrier
+#   define AO_t GC_word
+# endif
 #endif
 
 #define POP_SIZE 200
@@ -85,7 +85,7 @@
                 /* This is used only to update counters.        */
 #endif
 
-unsigned memhash(void *src, size_t len)
+static unsigned memhash(void *src, size_t len)
 {
   unsigned acc = 0;
   size_t i;
@@ -119,7 +119,7 @@ struct weakmap {
   struct weakmap_link **links; /* NULL means weakmap is destroyed */
 };
 
-void weakmap_lock(struct weakmap *wm, unsigned h)
+static void weakmap_lock(struct weakmap *wm, unsigned h)
 {
 # ifdef GC_PTHREADS
     int err = pthread_mutex_lock(&wm->mutex[h % WEAKMAP_MUTEX_COUNT]);
@@ -129,7 +129,7 @@ void weakmap_lock(struct weakmap *wm, unsigned h)
 # endif
 }
 
-int weakmap_trylock(struct weakmap *wm, unsigned h)
+static int weakmap_trylock(struct weakmap *wm, unsigned h)
 {
 # ifdef GC_PTHREADS
     int err = pthread_mutex_trylock(&wm->mutex[h % WEAKMAP_MUTEX_COUNT]);
@@ -144,7 +144,7 @@ int weakmap_trylock(struct weakmap *wm, unsigned h)
 # endif
 }
 
-void weakmap_unlock(struct weakmap *wm, unsigned h)
+static void weakmap_unlock(struct weakmap *wm, unsigned h)
 {
 # ifdef GC_PTHREADS
     int err = pthread_mutex_unlock(&wm->mutex[h % WEAKMAP_MUTEX_COUNT]);
@@ -154,13 +154,13 @@ void weakmap_unlock(struct weakmap *wm, unsigned h)
 # endif
 }
 
-void *GC_CALLBACK set_mark_bit(void *obj)
+static void *GC_CALLBACK set_mark_bit(void *obj)
 {
   GC_set_mark_bit(obj);
   return NULL;
 }
 
-void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
+static void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
 {
   struct weakmap_link *link, *new_link, **first;
   GC_word *new_base;
@@ -200,7 +200,7 @@ void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
 
   /* Create new object. */
   new_base = (GC_word *)GC_generic_malloc(sizeof(GC_word) + wm->obj_size,
-                                          wm->weakobj_kind);
+                                          (int)wm->weakobj_kind);
   CHECK_OOM(new_base);
   *new_base = (GC_word)wm | FINALIZER_CLOSURE_FLAG;
   new_obj = (void *)(new_base + 1);
@@ -208,13 +208,13 @@ void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
   GC_end_stubborn_change(new_base);
 
   /* Add the object to the map. */
-  new_link = GC_NEW(struct weakmap_link);
+  new_link = (struct weakmap_link *)GC_malloc(sizeof(struct weakmap_link));
   CHECK_OOM(new_link);
   new_link->obj = GC_get_find_leak() ? (GC_word)new_obj
                         : GC_HIDE_POINTER(new_obj);
   new_link->next = *first;
   GC_END_STUBBORN_CHANGE(new_link);
-  GC_PTR_STORE_AND_DIRTY(first, new_link);
+  GC_ptr_store_and_dirty(first, new_link);
   weakmap_unlock(wm, h);
   AO_fetch_and_add1(&stat_added);
 # ifdef DEBUG_DISCLAIM_WEAKMAP
@@ -223,7 +223,7 @@ void *weakmap_add(struct weakmap *wm, void *obj, size_t obj_size)
   return new_obj;
 }
 
-int GC_CALLBACK weakmap_disclaim(void *obj_base)
+static int GC_CALLBACK weakmap_disclaim(void *obj_base)
 {
   struct weakmap *wm;
   struct weakmap_link **link;
@@ -279,15 +279,15 @@ int GC_CALLBACK weakmap_disclaim(void *obj_base)
       break;
     my_assert(memcmp(old_obj, obj, wm->key_size) != 0);
   }
-  GC_PTR_STORE_AND_DIRTY(link, (*link)->next);
+  GC_ptr_store_and_dirty(link, (*link)->next);
   weakmap_unlock(wm, h);
   return 0;
 }
 
-struct weakmap *weakmap_new(size_t capacity, size_t key_size, size_t obj_size,
-                            unsigned weakobj_kind)
+static struct weakmap *weakmap_new(size_t capacity, size_t key_size,
+                                   size_t obj_size, unsigned weakobj_kind)
 {
-  struct weakmap *wm = GC_NEW(struct weakmap);
+  struct weakmap *wm = (struct weakmap *)GC_malloc(sizeof(struct weakmap));
 
   CHECK_OOM(wm);
 # ifdef GC_PTHREADS
@@ -303,13 +303,13 @@ struct weakmap *weakmap_new(size_t capacity, size_t key_size, size_t obj_size,
   wm->obj_size = obj_size;
   wm->capacity = capacity;
   wm->weakobj_kind = weakobj_kind;
-  GC_PTR_STORE_AND_DIRTY(&wm->links,
-                         GC_MALLOC(sizeof(struct weakmap_link *) * capacity));
+  GC_ptr_store_and_dirty(&wm->links,
+                         GC_malloc(sizeof(struct weakmap_link *) * capacity));
   CHECK_OOM(wm->links);
   return wm;
 }
 
-void weakmap_destroy(struct weakmap *wm)
+static void weakmap_destroy(struct weakmap *wm)
 {
 # ifdef GC_PTHREADS
     int i;
@@ -340,7 +340,7 @@ static const char * const pair_magic = "PAIR_MAGIC_BYTES";
 
 #define CSUM_SEED 782
 
-struct pair *pair_new(struct pair *car, struct pair *cdr)
+static struct pair *pair_new(struct pair *car, struct pair *cdr)
 {
   struct pair tmpl;
 
@@ -354,7 +354,7 @@ struct pair *pair_new(struct pair *car, struct pair *cdr)
   return (struct pair *)weakmap_add(pair_hcset, &tmpl, sizeof(tmpl));
 }
 
-void pair_check_rec(struct pair *p, int line)
+static void pair_check_rec(struct pair *p, int line)
 {
   while (p != NULL) {
     int checksum = CSUM_SEED;
@@ -376,7 +376,7 @@ void pair_check_rec(struct pair *p, int line)
   }
 }
 
-void *test(void *data)
+static void *test(void *data)
 {
   int i;
   struct pair *p0, *p1;
@@ -433,7 +433,7 @@ int main(void)
     printf("This test program is not designed for leak detection mode\n");
   weakobj_kind = GC_new_kind(GC_new_free_list(), /* 0 | */ GC_DS_LENGTH,
                              1 /* adjust */, 1 /* clear */);
-  GC_register_disclaim_proc(weakobj_kind, weakmap_disclaim,
+  GC_register_disclaim_proc((int)weakobj_kind, weakmap_disclaim,
                             1 /* mark_unconditionally */);
   pair_hcset = weakmap_new(WEAKMAP_CAPACITY, sizeof(struct pair_key),
                            sizeof(struct pair), weakobj_kind);

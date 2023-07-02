@@ -21,8 +21,6 @@
 # include "gc/gc_disclaim.h"
 #endif
 
-#include <stdio.h>
-
 GC_INNER signed_word GC_bytes_found = 0;
                         /* Number of bytes of memory reclaimed     */
                         /* minus the number of bytes originally    */
@@ -79,7 +77,6 @@ GC_INNER void GC_print_all_errors(void)
     GC_bool have_errors;
     unsigned i, n_leaked;
     ptr_t leaked[MAX_LEAKED];
-    DCL_LOCK_STATE;
 
     LOCK();
     if (printing_errors) {
@@ -149,7 +146,7 @@ STATIC GC_bool GC_block_nearly_full(hdr *hhdr, word sz)
 /* TODO: This should perhaps again be specialized for USE_MARK_BYTES    */
 /* and USE_MARK_BITS cases.                                             */
 
-GC_INLINE word *GC_clear_block(word *p, word sz, signed_word *count)
+GC_INLINE word *GC_clear_block(word *p, word sz, word *pcount)
 {
   word *q = (word *)((ptr_t)p + sz);
 
@@ -169,7 +166,7 @@ GC_INLINE word *GC_clear_block(word *p, word sz, signed_word *count)
       *p++ = 0;
     }
 # endif
-  *count += sz;
+  *pcount += sz;
   return p;
 }
 
@@ -179,7 +176,7 @@ GC_INLINE word *GC_clear_block(word *p, word sz, signed_word *count)
  * Clears unmarked objects.  Sz is in bytes.
  */
 STATIC ptr_t GC_reclaim_clear(struct hblk *hbp, hdr *hhdr, word sz,
-                              ptr_t list, signed_word *count)
+                              ptr_t list, word *pcount)
 {
     word bit_no = 0;
     ptr_t p, plim;
@@ -203,7 +200,7 @@ STATIC ptr_t GC_reclaim_clear(struct hblk *hbp, hdr *hhdr, word sz,
                 obj_link(p) = list;
                 list = p;
 
-                p = (ptr_t)GC_clear_block((word *)p, sz, count);
+                p = (ptr_t)GC_clear_block((word *)p, sz, pcount);
             }
             bit_no += MARK_BIT_OFFSET(sz);
         }
@@ -212,11 +209,11 @@ STATIC ptr_t GC_reclaim_clear(struct hblk *hbp, hdr *hhdr, word sz,
 
 /* The same thing, but don't clear objects: */
 STATIC ptr_t GC_reclaim_uninit(struct hblk *hbp, hdr *hhdr, word sz,
-                               ptr_t list, signed_word *count)
+                               ptr_t list, word *pcount)
 {
     word bit_no = 0;
     word *p, *plim;
-    signed_word n_bytes_found = 0;
+    word n_bytes_found = 0;
 
 #   ifndef THREADS
       GC_ASSERT(sz == hhdr -> hb_sz);
@@ -235,7 +232,7 @@ STATIC ptr_t GC_reclaim_uninit(struct hblk *hbp, hdr *hhdr, word sz,
             p = (word *)((ptr_t)p + sz);
             bit_no += MARK_BIT_OFFSET(sz);
         }
-    *count += n_bytes_found;
+    *pcount += n_bytes_found;
     return list;
 }
 
@@ -243,30 +240,31 @@ STATIC ptr_t GC_reclaim_uninit(struct hblk *hbp, hdr *hhdr, word sz,
   /* Call reclaim notifier for block's kind on each unmarked object in  */
   /* block, all within a pair of corresponding enter/leave callbacks.   */
   STATIC ptr_t GC_disclaim_and_reclaim(struct hblk *hbp, hdr *hhdr, word sz,
-                                       ptr_t list, signed_word *count)
+                                       ptr_t list, word *pcount)
   {
     word bit_no = 0;
     ptr_t p, plim;
-    struct obj_kind *ok = &GC_obj_kinds[hhdr->hb_obj_kind];
-    int (GC_CALLBACK *disclaim)(void *) = ok->ok_disclaim_proc;
+    int (GC_CALLBACK *disclaim)(void *) =
+                GC_obj_kinds[hhdr -> hb_obj_kind].ok_disclaim_proc;
 
+    GC_ASSERT(disclaim != 0);
 #   ifndef THREADS
       GC_ASSERT(sz == hhdr -> hb_sz);
 #   endif
-    p = hbp->hb_body;
+    p = hbp -> hb_body;
     plim = p + HBLKSIZE - sz;
 
     for (; (word)p <= (word)plim; bit_no += MARK_BIT_OFFSET(sz)) {
         if (mark_bit_from_hdr(hhdr, bit_no)) {
             p += sz;
-        } else if ((*disclaim)(p)) {
+        } else if (disclaim(p)) {
             set_mark_bit_from_hdr(hhdr, bit_no);
             hhdr -> hb_n_marks++;
             p += sz;
         } else {
             obj_link(p) = list;
             list = p;
-            p = (ptr_t)GC_clear_block((word *)p, sz, count);
+            p = (ptr_t)GC_clear_block((word *)p, sz, pcount);
         }
     }
     return list;
@@ -303,14 +301,10 @@ STATIC void GC_reclaim_check(struct hblk *hbp, hdr *hhdr, word sz)
 # define IS_PTRFREE_SAFE(hhdr) ((hhdr)->hb_descr == 0)
 #endif
 
-/*
- * Generic procedure to rebuild a free list in hbp.
- * Also called directly from GC_malloc_many.
- * Sz is now in bytes.
- */
-GC_INNER ptr_t GC_reclaim_generic(struct hblk * hbp, hdr *hhdr, size_t sz,
-                                  GC_bool init, ptr_t list,
-                                  signed_word *count)
+/* Generic procedure to rebuild a free list in hbp.  Also called    */
+/* directly from GC_malloc_many.  sz is in bytes.                   */
+GC_INNER ptr_t GC_reclaim_generic(struct hblk *hbp, hdr *hhdr, size_t sz,
+                                  GC_bool init, ptr_t list, word *pcount)
 {
     ptr_t result;
 
@@ -320,14 +314,14 @@ GC_INNER ptr_t GC_reclaim_generic(struct hblk * hbp, hdr *hhdr, size_t sz,
 #   endif
 #   ifdef ENABLE_DISCLAIM
       if ((hhdr -> hb_flags & HAS_DISCLAIM) != 0) {
-        result = GC_disclaim_and_reclaim(hbp, hhdr, sz, list, count);
+        result = GC_disclaim_and_reclaim(hbp, hhdr, sz, list, pcount);
       } else
 #   endif
     /* else */ if (init || GC_debugging_started) {
-      result = GC_reclaim_clear(hbp, hhdr, sz, list, count);
+      result = GC_reclaim_clear(hbp, hhdr, sz, list, pcount);
     } else {
       GC_ASSERT(IS_PTRFREE_SAFE(hhdr));
-      result = GC_reclaim_uninit(hbp, hhdr, sz, list, count);
+      result = GC_reclaim_uninit(hbp, hhdr, sz, list, pcount);
     }
     if (IS_UNCOLLECTABLE(hhdr -> hb_obj_kind)) GC_set_hdr_marks(hhdr);
     return result;
@@ -352,7 +346,7 @@ STATIC void GC_reclaim_small_nonempty_block(struct hblk *hbp, word sz,
         GC_reclaim_check(hbp, hhdr, sz);
     } else {
         *flh = GC_reclaim_generic(hbp, hhdr, sz, ok -> ok_init,
-                                  (ptr_t)(*flh), &GC_bytes_found);
+                                  (ptr_t)(*flh), (word *)&GC_bytes_found);
     }
 }
 
@@ -367,11 +361,11 @@ STATIC void GC_reclaim_small_nonempty_block(struct hblk *hbp, word sz,
 
     hhdr -> hb_last_reclaimed = (unsigned short) GC_gc_no;
     flh_next = GC_reclaim_generic(hbp, hhdr, sz, ok -> ok_init,
-                                  (ptr_t)(*flh), &GC_bytes_found);
+                                  (ptr_t)(*flh), (word *)&GC_bytes_found);
     if (hhdr -> hb_n_marks)
         *flh = flh_next;
     else {
-        GC_bytes_found += HBLKSIZE;
+        GC_bytes_found += (signed_word)HBLKSIZE;
         GC_freehblk(hbp);
     }
   }
@@ -394,35 +388,29 @@ STATIC void GC_CALLBACK GC_reclaim_block(struct hblk *hbp,
 
 #   ifdef AO_HAVE_load
         /* Atomic access is used to avoid racing with GC_realloc.       */
-        sz = (word)AO_load((volatile AO_t *)&hhdr->hb_sz);
+        sz = (word)AO_load((volatile AO_t *)&(hhdr -> hb_sz));
 #   else
         /* No race as GC_realloc holds the lock while updating hb_sz.   */
         sz = hhdr -> hb_sz;
 #   endif
-    if( sz > MAXOBJBYTES ) {  /* 1 big object */
-        if( !mark_bit_from_hdr(hhdr, 0) ) {
+    if (sz > MAXOBJBYTES) { /* 1 big object */
+        if (!mark_bit_from_hdr(hhdr, 0)) {
             if (report_if_found) {
               GC_add_leaked((ptr_t)hbp);
             } else {
-              word blocks;
-
 #             ifdef ENABLE_DISCLAIM
-                if (EXPECT(hhdr->hb_flags & HAS_DISCLAIM, 0)) {
-                  if ((*ok->ok_disclaim_proc)(hbp)) {
+                if (EXPECT(hhdr -> hb_flags & HAS_DISCLAIM, 0)) {
+                  if (ok -> ok_disclaim_proc(hbp)) {
                     /* Not disclaimed => resurrect the object. */
                     set_mark_bit_from_hdr(hhdr, 0);
                     goto in_use;
                   }
                 }
 #             endif
-              blocks = OBJ_SZ_TO_BLOCKS(sz);
-#             if defined(CPPCHECK)
-                GC_noop1((word)&blocks);
-#             endif
-              if (blocks > 1) {
-                GC_large_allocd_bytes -= blocks * HBLKSIZE;
+              if (sz > HBLKSIZE) {
+                GC_large_allocd_bytes -= HBLKSIZE * OBJ_SZ_TO_BLOCKS(sz);
               }
-              GC_bytes_found += sz;
+              GC_bytes_found += (signed_word)sz;
               GC_freehblk(hbp);
             }
         } else {
@@ -459,7 +447,7 @@ STATIC void GC_CALLBACK GC_reclaim_block(struct hblk *hbp,
           } else
 #       endif
           /* else */ {
-            GC_bytes_found += HBLKSIZE;
+            GC_bytes_found += (signed_word)HBLKSIZE;
             GC_freehblk(hbp);
           }
         } else if (GC_find_leak || !GC_block_nearly_full(hhdr, sz)) {
@@ -495,10 +483,17 @@ struct Print_stats
         size_t total_bytes;
 };
 
+EXTERN_C_BEGIN /* to avoid "no previous prototype" clang warning */
+unsigned GC_n_set_marks(hdr *);
+EXTERN_C_END
+
 #ifdef USE_MARK_BYTES
 
 /* Return the number of set mark bits in the given header.      */
 /* Remains externally visible as used by GNU GCJ currently.     */
+/* There could be a race between GC_clear_hdr_marks and this    */
+/* function but the latter is for a debug purpose.              */
+GC_ATTR_NO_SANITIZE_THREAD
 unsigned GC_n_set_marks(hdr *hhdr)
 {
     unsigned result = 0;
@@ -562,7 +557,7 @@ unsigned GC_n_set_marks(hdr *hhdr)
 #endif /* !USE_MARK_BYTES  */
 
 GC_API unsigned GC_CALL GC_count_set_marks_in_hblk(const void *p) {
-    return GC_n_set_marks(HDR(p));
+    return GC_n_set_marks(HDR((/* no const */ void *)(word)p));
 }
 
 STATIC void GC_CALLBACK GC_print_block_descr(struct hblk *h,
@@ -581,7 +576,8 @@ STATIC void GC_CALLBACK GC_print_block_descr(struct hblk *h,
     GC_printf("%u,%u,%u,%u\n",
               hhdr -> hb_obj_kind, (unsigned)sz, n_marks, n_objs);
     ps -> number_of_blocks++;
-    ps -> total_bytes += (sz + (HBLKSIZE-1)) & ~(HBLKSIZE-1); /* round up */
+    ps -> total_bytes +=
+                (sz + HBLKSIZE-1) & ~(word)(HBLKSIZE-1); /* round up */
 }
 
 void GC_print_block_list(void)
@@ -597,9 +593,8 @@ void GC_print_block_list(void)
               (unsigned long)pstats.total_bytes);
 }
 
-#include "gc/gc_inline.h" /* for GC_print_free_list prototype */
-
-/* Currently for debugger use only: */
+/* Currently for debugger use only.  Assumes the allocation lock is */
+/* held but no assertion about it by design.                        */
 GC_API void GC_CALL GC_print_free_list(int kind, size_t sz_in_granules)
 {
     void *flh_next;
@@ -643,6 +638,7 @@ GC_INNER void GC_start_reclaim(GC_bool report_if_found)
 {
     unsigned kind;
 
+    GC_ASSERT(I_HOLD_LOCK());
 #   if defined(PARALLEL_MARK)
       GC_ASSERT(0 == GC_fl_builder_count);
 #   endif
@@ -657,7 +653,7 @@ GC_INNER void GC_start_reclaim(GC_bool report_if_found)
         if (rlist == 0) continue;       /* This kind not used.  */
         if (!report_if_found) {
             void **fop;
-            void **lim = &(GC_obj_kinds[kind].ok_freelist[MAXOBJGRANULES+1]);
+            void **lim = &GC_obj_kinds[kind].ok_freelist[MAXOBJGRANULES+1];
 
             for (fop = GC_obj_kinds[kind].ok_freelist;
                  (word)fop < (word)lim; (*(word **)&fop)++) {
@@ -670,7 +666,7 @@ GC_INNER void GC_start_reclaim(GC_bool report_if_found)
               }
             }
         } /* otherwise free list objects are marked,    */
-          /* and its safe to leave them                 */
+          /* and it's safe to leave them.               */
         BZERO(rlist, (MAXOBJGRANULES + 1) * sizeof(void *));
       }
 
@@ -692,31 +688,29 @@ GC_INNER void GC_start_reclaim(GC_bool report_if_found)
 # if defined(PARALLEL_MARK)
     GC_ASSERT(0 == GC_fl_builder_count);
 # endif
-
 }
 
-/*
- * Sweep blocks of the indicated object size and kind until either the
- * appropriate free list is nonempty, or there are no more blocks to
- * sweep.
- */
+/* Sweep blocks of the indicated object size and kind until either  */
+/* the appropriate free list is nonempty, or there are no more      */
+/* blocks to sweep.                                                 */
 GC_INNER void GC_continue_reclaim(word sz /* granules */, int kind)
 {
-    hdr * hhdr;
     struct hblk * hbp;
-    struct obj_kind * ok = &(GC_obj_kinds[kind]);
+    struct obj_kind * ok = &GC_obj_kinds[kind];
     struct hblk ** rlh = ok -> ok_reclaim_list;
     void **flh = &(ok -> ok_freelist[sz]);
 
+    GC_ASSERT(I_HOLD_LOCK());
     if (NULL == rlh)
         return; /* No blocks of this kind.      */
 
     for (rlh += sz; (hbp = *rlh) != NULL; ) {
-        hhdr = HDR(hbp);
+        hdr *hhdr = HDR(hbp);
+
         *rlh = hhdr -> hb_next;
         GC_reclaim_small_nonempty_block(hbp, hhdr -> hb_sz, FALSE);
-        if (*flh != 0)
-            break;
+        if (*flh != NULL)
+            break; /* the appropriate free list is nonempty */
     }
 }
 
@@ -735,7 +729,6 @@ GC_INNER GC_bool GC_reclaim_all(GC_stop_func stop_func, GC_bool ignore_old)
     unsigned kind;
     hdr * hhdr;
     struct hblk * hbp;
-    struct obj_kind * ok;
     struct hblk ** rlp;
     struct hblk ** rlh;
 #   ifndef NO_CLOCK
@@ -744,10 +737,10 @@ GC_INNER GC_bool GC_reclaim_all(GC_stop_func stop_func, GC_bool ignore_old)
       if (GC_print_stats == VERBOSE)
         GET_TIME(start_time);
 #   endif
+    GC_ASSERT(I_HOLD_LOCK());
 
     for (kind = 0; kind < GC_n_kinds; kind++) {
-        ok = &(GC_obj_kinds[kind]);
-        rlp = ok -> ok_reclaim_list;
+        rlp = GC_obj_kinds[kind].ok_reclaim_list;
         if (rlp == 0) continue;
         for (sz = 1; sz <= MAXOBJGRANULES; sz++) {
             for (rlh = rlp + sz; (hbp = *rlh) != NULL; ) {
@@ -787,27 +780,24 @@ GC_INNER GC_bool GC_reclaim_all(GC_stop_func stop_func, GC_bool ignore_old)
 /* restricted to kinds where ok_mark_unconditionally is true.           */
   STATIC void GC_reclaim_unconditionally_marked(void)
   {
-    word sz;
     unsigned kind;
-    hdr * hhdr;
-    struct hblk * hbp;
-    struct obj_kind * ok;
-    struct hblk ** rlp;
-    struct hblk ** rlh;
 
     for (kind = 0; kind < GC_n_kinds; kind++) {
-        ok = &(GC_obj_kinds[kind]);
-        if (!ok->ok_mark_unconditionally)
-          continue;
-        rlp = ok->ok_reclaim_list;
-        if (rlp == 0)
-          continue;
+        word sz;
+        struct obj_kind *ok = &GC_obj_kinds[kind];
+        struct hblk **rlp = ok -> ok_reclaim_list;
+
+        if (NULL == rlp || !(ok -> ok_mark_unconditionally)) continue;
+
         for (sz = 1; sz <= MAXOBJGRANULES; sz++) {
-            rlh = rlp + sz;
-            while ((hbp = *rlh) != 0) {
-                hhdr = HDR(hbp);
-                *rlh = hhdr->hb_next;
-                GC_reclaim_small_nonempty_block(hbp, hhdr->hb_sz, FALSE);
+            struct hblk **rlh = rlp + sz;
+            struct hblk *hbp;
+
+            while ((hbp = *rlh) != NULL) {
+                hdr *hhdr = HDR(hbp);
+
+                *rlh = hhdr -> hb_next;
+                GC_reclaim_small_nonempty_block(hbp, hhdr -> hb_sz, FALSE);
             }
         }
     }

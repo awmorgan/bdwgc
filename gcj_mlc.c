@@ -32,9 +32,7 @@
  * possibly with some tuning of the constants.  But the immediate goal
  * is to get better gcj performance.
  *
- * We assume:
- *  1) Counting on explicit initialization of this interface is OK;
- *  2) FASTLOCK is not a significant win.
+ * We assume: counting on explicit initialization of this interface is OK.
  */
 
 #include "gc/gc_gcj.h"
@@ -46,11 +44,13 @@ int GC_gcj_debug_kind = 0;
                         /* The kind of objects that is always marked    */
                         /* with a mark proc call.                       */
 
-STATIC struct GC_ms_entry * GC_gcj_fake_mark_proc(word * addr GC_ATTR_UNUSED,
+STATIC struct GC_ms_entry * GC_gcj_fake_mark_proc(word * addr,
                         struct GC_ms_entry *mark_stack_ptr,
-                        struct GC_ms_entry * mark_stack_limit GC_ATTR_UNUSED,
-                        word env GC_ATTR_UNUSED)
+                        struct GC_ms_entry * mark_stack_limit, word env)
 {
+    UNUSED_ARG(addr);
+    UNUSED_ARG(mark_stack_limit);
+    UNUSED_ARG(env);
     ABORT_RET("No client gcj mark proc is specified");
     return mark_stack_ptr;
 }
@@ -61,7 +61,6 @@ GC_API void GC_CALL GC_init_gcj_malloc(int mp_index,
 #   ifndef GC_IGNORE_GCJ_INFO
       GC_bool ignore_gcj_info;
 #   endif
-    DCL_LOCK_STATE;
 
     if (mp == 0)        /* In case GC_DS_PROC is unused.        */
       mp = (void *)(word)GC_gcj_fake_mark_proc;
@@ -91,32 +90,26 @@ GC_API void GC_CALL GC_init_gcj_malloc(int mp_index,
     if (ignore_gcj_info) {
         /* Use a simple length-based descriptor, thus forcing a fully   */
         /* conservative scan.                                           */
-        GC_gcj_kind = GC_new_kind_inner((void **)GC_gcjobjfreelist,
-                                        /* 0 | */ GC_DS_LENGTH,
-                                        TRUE, TRUE);
+        GC_gcj_kind = (int)GC_new_kind_inner((void **)GC_gcjobjfreelist,
+                                             /* 0 | */ GC_DS_LENGTH,
+                                             TRUE, TRUE);
         GC_gcj_debug_kind = GC_gcj_kind;
     } else {
-        GC_gcj_kind = GC_new_kind_inner(
+        GC_gcj_kind = (int)GC_new_kind_inner(
                         (void **)GC_gcjobjfreelist,
                         (((word)(-(signed_word)MARK_DESCR_OFFSET
                                  - GC_INDIR_PER_OBJ_BIAS))
                          | GC_DS_PER_OBJECT),
                         FALSE, TRUE);
         /* Set up object kind for objects that require mark proc call.  */
-        GC_gcj_debug_kind = GC_new_kind_inner(GC_new_free_list_inner(),
+        GC_gcj_debug_kind = (int)GC_new_kind_inner(GC_new_free_list_inner(),
                                 GC_MAKE_PROC(mp_index,
-                                             1 /* allocated with debug info */),
+                                        1 /* allocated with debug info */),
                                 FALSE, TRUE);
     }
     UNLOCK();
 #   undef ignore_gcj_info
 }
-
-#define GENERAL_MALLOC_INNER(lb,k) \
-    GC_clear_stack(GC_generic_malloc_inner(lb, k))
-
-#define GENERAL_MALLOC_INNER_IOP(lb,k) \
-    GC_clear_stack(GC_generic_malloc_inner_ignore_off_page(lb, k))
 
 /* We need a mechanism to release the lock and invoke finalizers.       */
 /* We don't really have an opportunity to do this on a rarely executed  */
@@ -128,7 +121,6 @@ GC_API void GC_CALL GC_init_gcj_malloc(int mp_index,
 static void maybe_finalize(void)
 {
    static word last_finalized_no = 0;
-   DCL_LOCK_STATE;
 
    GC_ASSERT(I_HOLD_LOCK());
    if (GC_gc_no == last_finalized_no ||
@@ -140,44 +132,31 @@ static void maybe_finalize(void)
 }
 
 /* Allocate an object, clear it, and store the pointer to the   */
-/* type structure (vtable in gcj).                              */
-/* This adds a byte at the end of the object if GC_malloc would.*/
+/* type structure (vtable in gcj).  This adds a byte at the     */
+/* end of the object if GC_malloc would.                        */
 #ifdef THREAD_LOCAL_ALLOC
-  GC_INNER void * GC_core_gcj_malloc(size_t lb,
-                                     void * ptr_to_struct_containing_descr)
+  GC_INNER
 #else
-  GC_API GC_ATTR_MALLOC void * GC_CALL GC_gcj_malloc(size_t lb,
-                                      void * ptr_to_struct_containing_descr)
+  STATIC
 #endif
+void * GC_core_gcj_malloc(size_t lb, void * ptr_to_struct_containing_descr,
+                          unsigned flags)
 {
     ptr_t op;
-    DCL_LOCK_STATE;
+    size_t lg;
 
     GC_DBG_COLLECT_AT_MALLOC(lb);
-    if(SMALL_OBJ(lb)) {
-        word lg;
-
-        LOCK();
-        lg = GC_size_map[lb];
-        op = GC_gcjobjfreelist[lg];
-        if(EXPECT(0 == op, FALSE)) {
-            maybe_finalize();
-            op = (ptr_t)GENERAL_MALLOC_INNER((word)lb, GC_gcj_kind);
-            if (0 == op) {
-                GC_oom_func oom_fn = GC_oom_fn;
-                UNLOCK();
-                return (*oom_fn)(lb);
-            }
-        } else {
-            GC_gcjobjfreelist[lg] = (ptr_t)obj_link(op);
-            GC_bytes_allocd += GRANULES_TO_BYTES((word)lg);
-        }
-        GC_ASSERT(((void **)op)[1] == 0);
+    LOCK();
+    if (SMALL_OBJ(lb) && (op = GC_gcjobjfreelist[lg = GC_size_map[lb]],
+                          EXPECT(op != NULL, TRUE))) {
+        GC_gcjobjfreelist[lg] = (ptr_t)obj_link(op);
+        GC_bytes_allocd += GRANULES_TO_BYTES((word)lg);
+        GC_ASSERT(NULL == ((void **)op)[1]);
     } else {
-        LOCK();
         maybe_finalize();
-        op = (ptr_t)GENERAL_MALLOC_INNER((word)lb, GC_gcj_kind);
-        if (0 == op) {
+        op = (ptr_t)GC_clear_stack(GC_generic_malloc_inner(lb, GC_gcj_kind,
+                                                           flags));
+        if (NULL == op) {
             GC_oom_func oom_fn = GC_oom_fn;
             UNLOCK();
             return (*oom_fn)(lb);
@@ -190,20 +169,34 @@ static void maybe_finalize(void)
     return (void *)op;
 }
 
+#ifndef THREAD_LOCAL_ALLOC
+  GC_API GC_ATTR_MALLOC void * GC_CALL GC_gcj_malloc(size_t lb,
+                                      void * ptr_to_struct_containing_descr)
+  {
+    return GC_core_gcj_malloc(lb, ptr_to_struct_containing_descr, 0);
+  }
+#endif /* !THREAD_LOCAL_ALLOC */
+
+GC_API GC_ATTR_MALLOC void * GC_CALL GC_gcj_malloc_ignore_off_page(size_t lb,
+                                        void * ptr_to_struct_containing_descr)
+{
+    return GC_core_gcj_malloc(lb, ptr_to_struct_containing_descr,
+                              IGNORE_OFF_PAGE);
+}
+
 /* Similar to GC_gcj_malloc, but add debug info.  This is allocated     */
 /* with GC_gcj_debug_kind.                                              */
 GC_API GC_ATTR_MALLOC void * GC_CALL GC_debug_gcj_malloc(size_t lb,
                 void * ptr_to_struct_containing_descr, GC_EXTRA_PARAMS)
 {
     void * result;
-    DCL_LOCK_STATE;
 
     /* We're careful to avoid extra calls, which could          */
     /* confuse the backtrace.                                   */
     LOCK();
     maybe_finalize();
     result = GC_generic_malloc_inner(SIZET_SAT_ADD(lb, DEBUG_BYTES),
-                                     GC_gcj_debug_kind);
+                                     GC_gcj_debug_kind, 0 /* flags */);
     if (NULL == result) {
         GC_oom_func oom_fn = GC_oom_fn;
         UNLOCK();
@@ -221,49 +214,6 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_debug_gcj_malloc(size_t lb,
     GC_dirty(result);
     REACHABLE_AFTER_DIRTY(ptr_to_struct_containing_descr);
     return result;
-}
-
-/* There is no THREAD_LOCAL_ALLOC for GC_gcj_malloc_ignore_off_page().  */
-GC_API GC_ATTR_MALLOC void * GC_CALL GC_gcj_malloc_ignore_off_page(size_t lb,
-                                     void * ptr_to_struct_containing_descr)
-{
-    ptr_t op;
-    DCL_LOCK_STATE;
-
-    GC_DBG_COLLECT_AT_MALLOC(lb);
-    if(SMALL_OBJ(lb)) {
-        word lg;
-
-        LOCK();
-        lg = GC_size_map[lb];
-        op = GC_gcjobjfreelist[lg];
-        if (EXPECT(0 == op, FALSE)) {
-            maybe_finalize();
-            op = (ptr_t)GENERAL_MALLOC_INNER_IOP(lb, GC_gcj_kind);
-            if (0 == op) {
-                GC_oom_func oom_fn = GC_oom_fn;
-                UNLOCK();
-                return (*oom_fn)(lb);
-            }
-        } else {
-            GC_gcjobjfreelist[lg] = (ptr_t)obj_link(op);
-            GC_bytes_allocd += GRANULES_TO_BYTES((word)lg);
-        }
-    } else {
-        LOCK();
-        maybe_finalize();
-        op = (ptr_t)GENERAL_MALLOC_INNER_IOP(lb, GC_gcj_kind);
-        if (0 == op) {
-            GC_oom_func oom_fn = GC_oom_fn;
-            UNLOCK();
-            return (*oom_fn)(lb);
-        }
-    }
-    *(void **)op = ptr_to_struct_containing_descr;
-    UNLOCK();
-    GC_dirty(op);
-    REACHABLE_AFTER_DIRTY(ptr_to_struct_containing_descr);
-    return (void *)op;
 }
 
 #endif  /* GC_GCJ_SUPPORT */

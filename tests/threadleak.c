@@ -27,9 +27,9 @@
 #define N_TESTS 100
 
 #ifdef GC_PTHREADS
-  void * test(void * arg)
+  static void * test(void * arg)
 #else
-  DWORD WINAPI test(LPVOID arg)
+  static DWORD WINAPI test(LPVOID arg)
 #endif
 {
     int *p[N_TESTS];
@@ -106,6 +106,8 @@ int main(void) {
             exit(2);
         }
     }
+# else
+    (void)test(NULL);
 # endif
 
     CHECK_LEAKS();

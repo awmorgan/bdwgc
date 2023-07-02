@@ -27,11 +27,6 @@
  * But then not much of anything is safe in the presence of dlclose.
  */
 
-#if !defined(MACOS) && !defined(GC_NO_TYPES) && !defined(SN_TARGET_PSP2) \
-    && !defined(_WIN32_WCE) && !defined(__CC_ARM)
-# include <sys/types.h>
-#endif
-
 /* BTL: avoid circular redefinition of dlopen if GC_SOLARIS_THREADS defined */
 #undef GC_MUST_RESTORE_REDEFINED_DLOPEN
 #if defined(GC_PTHREADS) && !defined(GC_NO_DLOPEN) \
@@ -51,24 +46,19 @@
 /* FIXME: Add filter support for more platforms.                        */
 STATIC GC_has_static_roots_func GC_has_static_roots = 0;
 
-#if (defined(DYNAMIC_LOADING) || defined(MSWIN32) || defined(MSWINCE) \
-    || defined(CYGWIN32)) && !defined(PCR)
+#if defined(DYNAMIC_LOADING) && !defined(PCR) || defined(ANY_MSWIN)
 
-#if !defined(DARWIN) && !defined(SCO_ELF) && !defined(SOLARISDL) \
-    && !defined(AIX) && !defined(DGUX) && !defined(IRIX5) && !defined(HPUX) \
-    && !defined(CYGWIN32) && !defined(MSWIN32) && !defined(MSWINCE) \
-    && !(defined(ALPHA) && defined(OSF1)) \
-    && !(defined(FREEBSD) && defined(__ELF__)) \
-    && !(defined(LINUX) && defined(__ELF__)) \
-    && !(defined(NETBSD) && defined(__ELF__)) \
-    && !(defined(OPENBSD) && (defined(__ELF__) || defined(M68K))) \
-    && !defined(HAIKU) && !defined(HURD) && !defined(NACL) \
-    && !defined(CPPCHECK)
+#if !(defined(CPPCHECK) || defined(AIX) || defined(ANY_MSWIN) \
+      || defined(DARWIN) || defined(DGUX) || defined(IRIX5) \
+      || defined(HAIKU) || defined(HPUX) || defined(HURD) \
+      || defined(NACL) || defined(SCO_ELF) || defined(SOLARISDL) \
+      || ((defined(ANY_BSD) || defined(LINUX)) && defined(__ELF__)) \
+      || (defined(ALPHA) && defined(OSF1)) \
+      || (defined(OPENBSD) && defined(M68K)))
 # error We only know how to find data segments of dynamic libraries for above.
 # error Additional SVR4 variants might not be too hard to add.
 #endif
 
-#include <stdio.h>
 #ifdef SOLARISDL
 #   include <sys/elf.h>
 #   include <dlfcn.h>
@@ -89,9 +79,8 @@ STATIC GC_has_static_roots_func GC_has_static_roots = 0;
 # endif
 #endif /* OPENBSD */
 
-#if defined(SCO_ELF) || defined(DGUX) || defined(HURD) || defined(NACL) \
-    || (defined(__ELF__) && (defined(LINUX) || defined(FREEBSD) \
-                             || defined(NETBSD) || defined(OPENBSD)))
+#if defined(DGUX) || defined(HURD) || defined(NACL) || defined(SCO_ELF) \
+    || ((defined(ANY_BSD) || defined(LINUX)) && defined(__ELF__))
 # include <stddef.h>
 # if !defined(OPENBSD) && !defined(HOST_ANDROID)
     /* OpenBSD does not have elf.h file; link.h below is sufficient.    */
@@ -259,12 +248,11 @@ GC_INNER void GC_register_dynamic_libraries(void)
     }
 }
 
-# endif /* !USE_PROC ... */
+# endif /* !USE_PROC_FOR_LIBRARIES */
 # endif /* SOLARISDL */
 
-#if defined(SCO_ELF) || defined(DGUX) || defined(HURD) || defined(NACL) \
-    || (defined(__ELF__) && (defined(LINUX) || defined(FREEBSD) \
-                             || defined(NETBSD) || defined(OPENBSD)))
+#if defined(DGUX) || defined(HURD) || defined(NACL) || defined(SCO_ELF) \
+    || ((defined(ANY_BSD) || defined(LINUX)) && defined(__ELF__))
 
 #ifdef USE_PROC_FOR_LIBRARIES
 
@@ -272,7 +260,6 @@ GC_INNER void GC_register_dynamic_libraries(void)
 
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <unistd.h>
 
 #define MAPS_BUF_SIZE (32*1024)
 
@@ -329,11 +316,13 @@ STATIC void GC_register_map_entries(const char *maps)
             /* This is a writable mapping.  Add it to           */
             /* the root set unless it is already otherwise      */
             /* accounted for.                                   */
-            if ((word)start <= (word)GC_stackbottom
-                && (word)end >= (word)GC_stackbottom) {
+#           ifndef THREADS
+              if ((word)start <= (word)GC_stackbottom
+                  && (word)end >= (word)GC_stackbottom) {
                 /* Stack mapping; discard       */
                 continue;
-            }
+              }
+#           endif
 #           if defined(E2K) && defined(__ptr64__)
               /* TODO: avoid hard-coded addresses */
               if ((word)start == 0xc2fffffff000UL
@@ -425,9 +414,8 @@ GC_INNER GC_bool GC_register_main_static_data(void)
 /* for glibc 2.2.4+.  Unfortunately, it doesn't work for older  */
 /* versions.  Thanks to Jakub Jelinek for most of the code.     */
 
-#if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ > 2) \
-    || (__GLIBC__ == 2 && __GLIBC_MINOR__ == 2 && defined(DT_CONFIG)) \
-    || defined(HOST_ANDROID) /* Are others OK here, too? */
+#if GC_GLIBC_PREREQ(2, 3) || defined(HOST_ANDROID)
+                        /* Are others OK here, too? */
 # ifndef HAVE_DL_ITERATE_PHDR
 #   define HAVE_DL_ITERATE_PHDR
 # endif
@@ -490,9 +478,10 @@ STATIC int GC_register_dynlib_callback(struct dl_phdr_info * info,
   ptr_t start, end;
   int i;
 
+  GC_ASSERT(I_HOLD_LOCK());
   /* Make sure struct dl_phdr_info is at least as big as we need.  */
-  if (size < offsetof (struct dl_phdr_info, dlpi_phnum)
-      + sizeof (info->dlpi_phnum))
+  if (size < offsetof(struct dl_phdr_info, dlpi_phnum)
+                + sizeof(info->dlpi_phnum))
     return -1;
 
   p = info->dlpi_phdr;
@@ -512,7 +501,7 @@ STATIC int GC_register_dynlib_callback(struct dl_phdr_info * info,
           /* probably, we should remove the corresponding assertion */
           /* check in GC_add_roots_inner along with this code line. */
           /* start pointer value may require aligning.              */
-          start = (ptr_t)((word)start & ~(word)(sizeof(word) - 1));
+          start = (ptr_t)((word)start & ~(word)(sizeof(word)-1));
 #       endif
         if (n_load_segs >= MAX_LOAD_SEGS) {
           if (!load_segs_overflow) {
@@ -553,9 +542,8 @@ STATIC int GC_register_dynlib_callback(struct dl_phdr_info * info,
               WARN("More than one GNU_RELRO segment per load one\n",0);
             } else {
               GC_ASSERT((word)end <=
-                            (((word)load_segs[j].end + GC_page_size - 1) &
-                             ~(GC_page_size - 1)));
-              /* Remove from the existing load segment */
+                (word)PTRT_ROUNDUP_BY_MASK(load_segs[j].end, GC_page_size-1));
+              /* Remove from the existing load segment. */
               load_segs[j].end2 = load_segs[j].end;
               load_segs[j].end = start;
               load_segs[j].start2 = end;
@@ -581,7 +569,7 @@ STATIC int GC_register_dynlib_callback(struct dl_phdr_info * info,
 /* Do we need to separately register the main static data segment? */
 GC_INNER GC_bool GC_register_main_static_data(void)
 {
-# ifdef DL_ITERATE_PHDR_STRONG
+# if defined(DL_ITERATE_PHDR_STRONG) && !defined(CPPCHECK)
     /* If dl_iterate_phdr is not a weak symbol then don't test against  */
     /* zero (otherwise a compiler might issue a warning).               */
     return FALSE;
@@ -594,6 +582,8 @@ GC_INNER GC_bool GC_register_main_static_data(void)
 STATIC GC_bool GC_register_dynamic_libraries_dl_iterate_phdr(void)
 {
   int did_something;
+
+  GC_ASSERT(I_HOLD_LOCK());
   if (GC_register_main_static_data())
     return FALSE;
 
@@ -933,22 +923,24 @@ GC_INNER void GC_register_dynamic_libraries(void)
         fd = -1;
 }
 
-# endif /* USE_PROC || IRIX5 */
+# endif /* USE_PROC_FOR_LIBRARIES || IRIX5 */
 
-# if defined(MSWIN32) || defined(MSWINCE) || defined(CYGWIN32)
-
-# include <stdlib.h>
-
+#ifdef ANY_MSWIN
   /* We traverse the entire address space and register all segments     */
   /* that could possibly have been written to.                          */
   STATIC void GC_cond_add_roots(char *base, char * limit)
   {
-#   ifdef GC_WIN32_THREADS
+#   ifdef THREADS
       char * curr_base = base;
       char * next_stack_lo;
       char * next_stack_hi;
+#   else
+      char * stack_top;
+#   endif
 
-      if (base == limit) return;
+    GC_ASSERT(I_HOLD_LOCK());
+    if (base == limit) return;
+#   ifdef THREADS
       for(;;) {
           GC_get_next_stack(curr_base, limit, &next_stack_lo, &next_stack_hi);
           if ((word)next_stack_lo >= (word)limit) break;
@@ -959,11 +951,8 @@ GC_INNER void GC_register_dynamic_libraries(void)
       if ((word)curr_base < (word)limit)
         GC_add_roots_inner(curr_base, limit, TRUE);
 #   else
-      char * stack_top
-         = (char *)((word)GC_approx_sp() &
-                    ~(word)(GC_sysinfo.dwAllocationGranularity - 1));
-
-      if (base == limit) return;
+      stack_top = (char *)((word)GC_approx_sp() &
+                            ~(word)(GC_sysinfo.dwAllocationGranularity - 1));
       if ((word)limit > (word)stack_top
           && (word)base < (word)GC_stackbottom) {
           /* Part of the stack; ignore it. */
@@ -1030,8 +1019,7 @@ GC_INNER void GC_register_dynamic_libraries(void)
 #       ifdef MSWINCE
           if (result == 0) {
             /* Page is free; advance to the next possible allocation base */
-            new_limit = (char *)
-                (((DWORD) p + GC_sysinfo.dwAllocationGranularity)
+            new_limit = (char *)(((word)p + GC_sysinfo.dwAllocationGranularity)
                  & ~(GC_sysinfo.dwAllocationGranularity-1));
           } else
 #       endif
@@ -1073,26 +1061,27 @@ GC_INNER void GC_register_dynamic_libraries(void)
     }
     GC_cond_add_roots(base, limit);
   }
-
-#endif /* MSWIN32 || MSWINCE || CYGWIN32 */
+#endif /* ANY_MSWIN */
 
 #if defined(ALPHA) && defined(OSF1)
+# include <loader.h>
 
-#include <loader.h>
+  EXTERN_C_BEGIN
+  extern char *sys_errlist[];
+  extern int sys_nerr;
+  extern int errno;
+  EXTERN_C_END
 
-EXTERN_C_BEGIN
-extern char *sys_errlist[];
-extern int sys_nerr;
-extern int errno;
-EXTERN_C_END
+  GC_INNER void GC_register_dynamic_libraries(void)
+  {
+    ldr_module_t moduleid = LDR_NULL_MODULE;
+    ldr_process_t mypid;
 
-GC_INNER void GC_register_dynamic_libraries(void)
-{
-  ldr_module_t moduleid = LDR_NULL_MODULE;
-  ldr_process_t mypid = ldr_my_process(); /* obtain id of this process */
+    GC_ASSERT(I_HOLD_LOCK());
+    mypid = ldr_my_process(); /* obtain id of this process */
 
-  /* For each module */
-    while (TRUE) {
+    /* For each module. */
+    for (;;) {
       ldr_module_info_t moduleinfo;
       size_t modulereturnsize;
       ldr_region_t region;
@@ -1101,9 +1090,8 @@ GC_INNER void GC_register_dynamic_libraries(void)
       int status = ldr_next_module(mypid, &moduleid);
                                 /* Get the next (first) module */
 
-      /* Any more modules? */
-        if (moduleid == LDR_NULL_MODULE)
-            break;    /* No more modules */
+      if (moduleid == LDR_NULL_MODULE)
+        break;  /* no more modules */
 
       /* Check status AFTER checking moduleid because       */
       /* of a bug in the non-shared ldr_next_module stub.   */
@@ -1131,7 +1119,7 @@ GC_INNER void GC_register_dynamic_libraries(void)
         GC_log_printf("Module pathname: \"%s\"\n", moduleinfo.lmi_name);
 #     endif
 
-      /* For each region in this module */
+      /* For each region in this module. */
         for (region = 0; region < moduleinfo.lmi_nregion; region++) {
           /* Get the region information */
             status = ldr_inq_region(mypid, moduleid, region, &regioninfo,
@@ -1160,11 +1148,10 @@ GC_INNER void GC_register_dynamic_libraries(void)
 
         }
     }
-}
-#endif
+  }
+#endif /* ALPHA && OSF1 */
 
 #if defined(HPUX)
-
 #include <errno.h>
 #include <dl.h>
 
@@ -1177,8 +1164,9 @@ GC_INNER void GC_register_dynamic_libraries(void)
 {
   int index = 1; /* Ordinal position in shared library search list */
 
-  /* For each dynamic library loaded */
-    while (TRUE) {
+  GC_ASSERT(I_HOLD_LOCK());
+  /* For each dynamic library loaded. */
+  for (;;) {
       struct shl_descriptor *shl_desc; /* Shared library info, see dl.h */
       int status = shl_get(index, &shl_desc);
                                 /* Get info about next shared library   */
@@ -1217,7 +1205,7 @@ GC_INNER void GC_register_dynamic_libraries(void)
                            (char *) shl_desc->dend, TRUE);
 
         index++;
-    }
+  }
 }
 #endif /* HPUX */
 
@@ -1225,10 +1213,12 @@ GC_INNER void GC_register_dynamic_libraries(void)
 # include <alloca.h>
 # include <sys/ldr.h>
 # include <sys/errno.h>
+
   GC_INNER void GC_register_dynamic_libraries(void)
   {
       int ldibuflen = 8192;
 
+      GC_ASSERT(I_HOLD_LOCK());
       for (;;) {
         int len;
         struct ld_info *ldi;
@@ -1330,7 +1320,6 @@ STATIC void GC_dyld_image_add(const struct GC_MACH_HEADER *hdr,
   const struct GC_MACH_SECTION *sec;
   const char *name;
   GC_has_static_roots_func callback = GC_has_static_roots;
-  DCL_LOCK_STATE;
 
   GC_ASSERT(I_DONT_HOLD_LOCK());
   if (GC_no_dls) return;
@@ -1398,9 +1387,6 @@ STATIC void GC_dyld_image_remove(const struct GC_MACH_HEADER *hdr,
   unsigned long start, end;
   unsigned i, j;
   const struct GC_MACH_SECTION *sec;
-# if defined(DARWIN_DEBUG) && !defined(NO_DEBUGGING)
-    DCL_LOCK_STATE;
-# endif
 
   GC_ASSERT(I_DONT_HOLD_LOCK());
   for (i = 0; i < sizeof(GC_dyld_sections)/sizeof(GC_dyld_sections[0]); i++) {
@@ -1533,6 +1519,7 @@ GC_INNER GC_bool GC_register_main_static_data(void)
     image_info info;
     int32 cookie = 0;
 
+    GC_ASSERT(I_HOLD_LOCK());
     while (get_next_image_info(0, &cookie, &info) == B_OK) {
       ptr_t data = (ptr_t)info.data;
       GC_add_roots_inner(data, data + info.data_size, TRUE);

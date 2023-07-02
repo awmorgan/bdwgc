@@ -15,7 +15,6 @@
  */
 
 #include "private/gc_pmark.h"
-#include "gc/gc_inline.h" /* for GC_malloc_kind */
 
 /*
  * Some simple primitives for allocation with explicit type information.
@@ -53,8 +52,8 @@ STATIC int GC_array_kind = 0;
 
 #define ED_INITIAL_SIZE 100
 
-STATIC int GC_typed_mark_proc_index = 0; /* Indices of my mark          */
-STATIC int GC_array_mark_proc_index = 0; /* procedures.                 */
+STATIC unsigned GC_typed_mark_proc_index = 0;   /* Indices of the typed */
+STATIC unsigned GC_array_mark_proc_index = 0;   /* mark procedures.     */
 
 STATIC void GC_push_typed_structures_proc(void)
 {
@@ -68,7 +67,6 @@ STATIC signed_word GC_add_ext_descriptor(const word * bm, word nbits)
     size_t nwords = divWORDSZ(nbits + WORDSZ-1);
     signed_word result;
     size_t i;
-    DCL_LOCK_STATE;
 
     LOCK();
     while (EXPECT(GC_avail_descr + nwords >= GC_ed_size, FALSE)) {
@@ -100,16 +98,17 @@ STATIC signed_word GC_add_ext_descriptor(const word * bm, word nbits)
             GC_ext_descriptors = newExtD;
         }  /* else another thread already resized it in the meantime */
     }
-    result = GC_avail_descr;
+    result = (signed_word)GC_avail_descr;
     for (i = 0; i < nwords-1; i++) {
-        GC_ext_descriptors[result + i].ed_bitmap = bm[i];
-        GC_ext_descriptors[result + i].ed_continued = TRUE;
+        GC_ext_descriptors[(size_t)result + i].ed_bitmap = bm[i];
+        GC_ext_descriptors[(size_t)result + i].ed_continued = TRUE;
     }
     /* Clear irrelevant (highest) bits for the last element.    */
-    GC_ext_descriptors[result + i].ed_bitmap =
+    GC_ext_descriptors[(size_t)result + i].ed_bitmap =
                 bm[i] & (GC_WORD_MAX >> (nwords * WORDSZ - nbits));
-    GC_ext_descriptors[result + i].ed_continued = FALSE;
+    GC_ext_descriptors[(size_t)result + i].ed_continued = FALSE;
     GC_avail_descr += nwords;
+    GC_ASSERT(result >= 0);
     UNLOCK();
     return result;
 }
@@ -127,7 +126,7 @@ STATIC GC_descr GC_double_descr(GC_descr d, size_t nwords)
     if ((d & GC_DS_TAGS) == GC_DS_LENGTH) {
         d = GC_bm_table[BYTES_TO_WORDS((word)d)];
     }
-    d |= (d & ~GC_DS_TAGS) >> nwords;
+    d |= (d & ~(GC_descr)GC_DS_TAGS) >> nwords;
     return d;
 }
 
@@ -144,13 +143,13 @@ STATIC void GC_init_explicit_typing(void)
     /* Set up object kind with simple indirect descriptor.      */
     /* Descriptor is in the last word of the object.            */
     GC_typed_mark_proc_index = GC_new_proc_inner(GC_typed_mark_proc);
-    GC_explicit_kind = GC_new_kind_inner(GC_new_free_list_inner(),
+    GC_explicit_kind = (int)GC_new_kind_inner(GC_new_free_list_inner(),
                             (WORDS_TO_BYTES((word)-1) | GC_DS_PER_OBJECT),
                             TRUE, TRUE);
 
     /* Set up object kind with array descriptor. */
     GC_array_mark_proc_index = GC_new_proc_inner(GC_array_mark_proc);
-    GC_array_kind = GC_new_kind_inner(GC_new_free_list_inner(),
+    GC_array_kind = (int)GC_new_kind_inner(GC_new_free_list_inner(),
                             GC_MAKE_PROC(GC_array_mark_proc_index, 0),
                             FALSE, TRUE);
 
@@ -180,7 +179,7 @@ STATIC mse * GC_typed_mark_proc(word * addr, mse * mark_stack_ptr,
 
             LOAD_WORD_OR_CONTINUE(current, current_p);
             FIXUP_POINTER(current);
-            if (current >= (word)least_ha && current <= (word)greatest_ha) {
+            if (current > (word)least_ha && current < (word)greatest_ha) {
                 PUSH_CONTENTS((ptr_t)current, mark_stack_ptr,
                               mark_stack_limit, current_p);
             }
@@ -206,7 +205,6 @@ GC_API GC_descr GC_CALL GC_make_descriptor(const GC_word * bm, size_t len)
 {
     signed_word last_set_bit = (signed_word)len - 1;
     GC_descr d;
-    DCL_LOCK_STATE;
 
 #   if defined(AO_HAVE_load_acquire) && defined(AO_HAVE_store_release)
       if (!EXPECT(AO_load_acquire(&GC_explicit_typing_initialized), TRUE)) {
@@ -226,7 +224,7 @@ GC_API GC_descr GC_CALL GC_make_descriptor(const GC_word * bm, size_t len)
       UNLOCK();
 #   endif
 
-    while (last_set_bit >= 0 && !GC_get_bit(bm, last_set_bit))
+    while (last_set_bit >= 0 && !GC_get_bit(bm, (word)last_set_bit))
       last_set_bit--;
     if (last_set_bit < 0) return 0; /* no pointers */
 
@@ -235,13 +233,13 @@ GC_API GC_descr GC_CALL GC_make_descriptor(const GC_word * bm, size_t len)
       signed_word i;
 
       for (i = 0; i < last_set_bit; i++) {
-        if (!GC_get_bit(bm, i)) {
+        if (!GC_get_bit(bm, (word)i)) {
           break;
         }
       }
       if (i == last_set_bit) {
         /* An initial section contains all pointers.  Use length descriptor. */
-        return WORDS_TO_BYTES(last_set_bit + 1) | GC_DS_LENGTH;
+        return WORDS_TO_BYTES((word)last_set_bit + 1) | GC_DS_LENGTH;
       }
     }
 #   endif
@@ -253,7 +251,7 @@ GC_API GC_descr GC_CALL GC_make_descriptor(const GC_word * bm, size_t len)
         d = SIGNB;
         for (i = last_set_bit - 1; i >= 0; i--) {
             d >>= 1;
-            if (GC_get_bit(bm, i)) d |= SIGNB;
+            if (GC_get_bit(bm, (word)i)) d |= SIGNB;
         }
         d |= GC_DS_BITMAP;
     } else {
@@ -261,9 +259,9 @@ GC_API GC_descr GC_CALL GC_make_descriptor(const GC_word * bm, size_t len)
 
         if (EXPECT(index == -1, FALSE)) {
             /* Out of memory: use a conservative approximation. */
-            return WORDS_TO_BYTES(last_set_bit + 1) | GC_DS_LENGTH;
+            return WORDS_TO_BYTES((word)last_set_bit + 1) | GC_DS_LENGTH;
         }
-        d = GC_MAKE_PROC(GC_typed_mark_proc_index, (word)index);
+        d = GC_MAKE_PROC(GC_typed_mark_proc_index, index);
     }
     return d;
 }
@@ -284,11 +282,10 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_explicitly_typed(size_t lb,
 
     GC_ASSERT(GC_explicit_typing_initialized);
     if (EXPECT(0 == lb, FALSE)) lb = 1; /* ensure nwords > 1 */
-    lb = SIZET_SAT_ADD(lb, TYPD_EXTRA_BYTES);
-    op = GC_malloc_kind(lb, GC_explicit_kind);
-    if (EXPECT(NULL == op, FALSE))
-        return NULL;
-    /* It is not safe to use GC_size_map[lb] to compute nwords here as  */
+    op = GC_malloc_kind(SIZET_SAT_ADD(lb, TYPD_EXTRA_BYTES), GC_explicit_kind);
+    if (EXPECT(NULL == op, FALSE)) return NULL;
+
+    /* It is not safe to use GC_size_map to compute nwords here as      */
     /* the former might be updated asynchronously.                      */
     nwords = GRANULES_TO_WORDS(BYTES_TO_GRANULES(GC_size(op)));
     set_obj_descr(op, nwords, d);
@@ -297,48 +294,27 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_malloc_explicitly_typed(size_t lb,
     return op;
 }
 
-/* We make the GC_clear_stack() call a tail one, hoping to get more of  */
-/* the stack.                                                           */
-#define GENERAL_MALLOC_IOP(lb, k) \
-                GC_clear_stack(GC_generic_malloc_ignore_off_page(lb, k))
-
 GC_API GC_ATTR_MALLOC void * GC_CALL
     GC_malloc_explicitly_typed_ignore_off_page(size_t lb, GC_descr d)
 {
     void *op;
-    size_t lg;
-    DCL_LOCK_STATE;
+    size_t nwords;
+
+    if (lb < HBLKSIZE - sizeof(word))
+      return GC_malloc_explicitly_typed(lb, d);
 
     GC_ASSERT(GC_explicit_typing_initialized);
-    if (EXPECT(0 == lb, FALSE)) lb = 1;
-    lb = SIZET_SAT_ADD(lb, TYPD_EXTRA_BYTES);
-    if (SMALL_OBJ(lb)) {
-        void **opp;
+    /* TYPD_EXTRA_BYTES is not used here because ignore-off-page    */
+    /* objects with the requested size of at least HBLKSIZE do not  */
+    /* have EXTRA_BYTES added by GC_generic_malloc_aligned().       */
+    op = GC_clear_stack(GC_generic_malloc_aligned(
+                                SIZET_SAT_ADD(lb, sizeof(word)),
+                                GC_explicit_kind, IGNORE_OFF_PAGE, 0));
+    if (EXPECT(NULL == op, FALSE)) return NULL;
 
-        GC_DBG_COLLECT_AT_MALLOC(lb);
-        LOCK();
-        lg = GC_size_map[lb];
-        opp = &GC_obj_kinds[GC_explicit_kind].ok_freelist[lg];
-        op = *opp;
-        if (EXPECT(NULL == op, FALSE)) {
-            UNLOCK();
-            op = GENERAL_MALLOC_IOP(lb, GC_explicit_kind);
-            if (NULL == op) return NULL;
-            /* See the comment in GC_malloc_explicitly_typed.   */
-            lg = BYTES_TO_GRANULES(GC_size(op));
-        } else {
-            *opp = obj_link(op);
-            obj_link(op) = 0;
-            GC_bytes_allocd += GRANULES_TO_BYTES((word)lg);
-            UNLOCK();
-        }
-    } else {
-        op = GENERAL_MALLOC_IOP(lb, GC_explicit_kind);
-        if (EXPECT(NULL == op, FALSE)) return NULL;
-        lg = BYTES_TO_GRANULES(GC_size(op));
-    }
-    set_obj_descr(op, GRANULES_TO_WORDS(lg), d);
-    GC_dirty((word *)op + GRANULES_TO_WORDS(lg) - 1);
+    nwords = GRANULES_TO_WORDS(BYTES_TO_GRANULES(GC_size(op)));
+    set_obj_descr(op, nwords, d);
+    GC_dirty((word *)op + nwords - 1);
     REACHABLE_AFTER_DIRTY(d);
     return op;
 }
@@ -472,8 +448,9 @@ STATIC int GC_make_array_descriptor(size_t nelements, size_t size,
     one_element = GC_make_leaf_descriptor(size, 1, d);
     if (EXPECT(NULL == one_element, FALSE)) return NO_MEM;
 
-    beginning = *pcomplex_d;
-    if (result != COMPLEX) {
+    if (COMPLEX == result) {
+      beginning = *pcomplex_d;
+    } else {
       beginning = SIMPLE == result ?
                         GC_make_leaf_descriptor(size, 1, *psimple_d) :
                         GC_make_leaf_descriptor(pleaf -> ld_size,
@@ -493,54 +470,90 @@ STATIC int GC_make_array_descriptor(size_t nelements, size_t size,
   return LEAF;
 }
 
-GC_API GC_ATTR_MALLOC void * GC_CALL GC_calloc_explicitly_typed(size_t n,
-                                                        size_t lb, GC_descr d)
+struct GC_calloc_typed_descr_s {
+  struct LeafDescriptor leaf;
+  GC_descr simple_d;
+  complex_descriptor *complex_d;
+  word alloc_lb; /* size_t actually */
+  signed_word descr_type; /* int actually */
+};
+
+GC_API int GC_CALL GC_calloc_prepare_explicitly_typed(
+                                struct GC_calloc_typed_descr_s *pctd,
+                                size_t ctd_sz,
+                                size_t n, size_t lb, GC_descr d)
+{
+    GC_STATIC_ASSERT(sizeof(struct LeafDescriptor) % sizeof(word) == 0);
+    GC_STATIC_ASSERT(sizeof(struct GC_calloc_typed_descr_s)
+                        == GC_CALLOC_TYPED_DESCR_WORDS * sizeof(word));
+    GC_ASSERT(GC_explicit_typing_initialized);
+    GC_ASSERT(sizeof(struct GC_calloc_typed_descr_s) == ctd_sz);
+    (void)ctd_sz; /* unused currently */
+    if (EXPECT(0 == lb || 0 == n, FALSE)) lb = n = 1;
+    if (EXPECT((lb | n) > GC_SQRT_SIZE_MAX, FALSE) /* fast initial check */
+        && n > GC_SIZE_MAX / lb) {
+      pctd -> alloc_lb = GC_SIZE_MAX; /* n*lb overflow */
+      pctd -> descr_type = NO_MEM;
+      /* The rest of the fields are unset. */
+      return 0; /* failure */
+    }
+
+    pctd -> descr_type = GC_make_array_descriptor((word)n, (word)lb, d,
+                                &(pctd -> simple_d), &(pctd -> complex_d),
+                                &(pctd -> leaf));
+    switch (pctd -> descr_type) {
+    case NO_MEM:
+    case SIMPLE:
+      pctd -> alloc_lb = (word)lb * n;
+      break;
+    case LEAF:
+      pctd -> alloc_lb = (word)SIZET_SAT_ADD(lb * n,
+                        sizeof(struct LeafDescriptor) + TYPD_EXTRA_BYTES);
+      break;
+    case COMPLEX:
+      pctd -> alloc_lb = (word)SIZET_SAT_ADD(lb * n, TYPD_EXTRA_BYTES);
+      break;
+    }
+    return 1; /* success */
+}
+
+GC_API GC_ATTR_MALLOC void * GC_CALL GC_calloc_do_explicitly_typed(
+                                const struct GC_calloc_typed_descr_s *pctd,
+                                size_t ctd_sz)
 {
     void *op;
     size_t nwords;
-    GC_descr simple_d;
-    complex_descriptor *complex_d;
-    int descr_type;
-    struct LeafDescriptor leaf;
-    DCL_LOCK_STATE;
 
-    GC_STATIC_ASSERT(sizeof(struct LeafDescriptor) % sizeof(word) == 0);
-    GC_ASSERT(GC_explicit_typing_initialized);
-    if (EXPECT(0 == lb || 0 == n, FALSE)) lb = n = 1;
-    if (EXPECT((lb | n) > GC_SQRT_SIZE_MAX, FALSE) /* fast initial check */
-        && n > GC_SIZE_MAX / lb)
-      return (*GC_get_oom_fn())(GC_SIZE_MAX); /* n*lb overflow */
-
-    descr_type = GC_make_array_descriptor((word)n, (word)lb, d,
-                                          &simple_d, &complex_d, &leaf);
-    lb *= n;
-    switch(descr_type) {
-        case NO_MEM:
-            return NULL;
-        case SIMPLE:
-            return GC_malloc_explicitly_typed(lb, simple_d);
-        case LEAF:
-            lb = SIZET_SAT_ADD(lb,
-                        sizeof(struct LeafDescriptor) + TYPD_EXTRA_BYTES);
-            break;
-        case COMPLEX:
-            lb = SIZET_SAT_ADD(lb, TYPD_EXTRA_BYTES);
-            break;
+    GC_ASSERT(sizeof(struct GC_calloc_typed_descr_s) == ctd_sz);
+    (void)ctd_sz; /* unused currently */
+    switch (pctd -> descr_type) {
+    case NO_MEM:
+      return (*GC_get_oom_fn())((size_t)(pctd -> alloc_lb));
+    case SIMPLE:
+      return GC_malloc_explicitly_typed((size_t)(pctd -> alloc_lb),
+                                        pctd -> simple_d);
+    case LEAF:
+    case COMPLEX:
+      break;
+    default:
+      ABORT_RET("Bad descriptor type");
+      return NULL;
     }
-    op = GC_malloc_kind(lb, GC_array_kind);
+    op = GC_malloc_kind((size_t)(pctd -> alloc_lb), GC_array_kind);
     if (EXPECT(NULL == op, FALSE))
-        return NULL;
+      return NULL;
+
     nwords = GRANULES_TO_WORDS(BYTES_TO_GRANULES(GC_size(op)));
-    if (descr_type == LEAF) {
+    if (pctd -> descr_type == LEAF) {
       /* Set up the descriptor inside the object itself.        */
       struct LeafDescriptor *lp =
                 (struct LeafDescriptor *)((word *)op + nwords -
                         (BYTES_TO_WORDS(sizeof(struct LeafDescriptor)) + 1));
 
       lp -> ld_tag = LEAF_TAG;
-      lp -> ld_size = leaf.ld_size;
-      lp -> ld_nelements = leaf.ld_nelements;
-      lp -> ld_descriptor = leaf.ld_descriptor;
+      lp -> ld_size = pctd -> leaf.ld_size;
+      lp -> ld_nelements = pctd -> leaf.ld_nelements;
+      lp -> ld_descriptor = pctd -> leaf.ld_descriptor;
       /* Hold the allocation lock while writing the descriptor word     */
       /* to the object to ensure that the descriptor contents are seen  */
       /* by GC_array_mark_proc as expected.                             */
@@ -555,11 +568,11 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_calloc_explicitly_typed(size_t n,
     } else {
 #     ifndef GC_NO_FINALIZATION
         LOCK();
-        ((word *)op)[nwords - 1] = (word)complex_d;
+        ((word *)op)[nwords - 1] = (word)(pctd -> complex_d);
         UNLOCK();
 
         GC_dirty((word *)op + nwords - 1);
-        REACHABLE_AFTER_DIRTY(complex_d);
+        REACHABLE_AFTER_DIRTY(pctd -> complex_d);
 
         /* Make sure the descriptor is cleared once there is any danger */
         /* it may have been collected.                                  */
@@ -568,10 +581,20 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_calloc_explicitly_typed(size_t n,
 #     endif
         {
             /* Couldn't register it due to lack of memory.  Punt.       */
-            return (*GC_get_oom_fn())(lb);
+            return (*GC_get_oom_fn())((size_t)(pctd -> alloc_lb));
         }
     }
     return op;
+}
+
+GC_API GC_ATTR_MALLOC void * GC_CALL GC_calloc_explicitly_typed(size_t n,
+                                                                size_t lb,
+                                                                GC_descr d)
+{
+  struct GC_calloc_typed_descr_s ctd;
+
+  (void)GC_calloc_prepare_explicitly_typed(&ctd, sizeof(ctd), n, lb, d);
+  return GC_calloc_do_explicitly_typed(&ctd, sizeof(ctd));
 }
 
 /* Return the size of the object described by complex_d.  It would be   */
@@ -656,9 +679,9 @@ static complex_descriptor *get_complex_descr(word *addr, size_t nwords)
   return (complex_descriptor *)addr[nwords - 1];
 }
 
-/* Used by GC_calloc_explicitly_typed via GC_array_kind.        */
+/* Used by GC_calloc_do_explicitly_typed via GC_array_kind.     */
 STATIC mse *GC_array_mark_proc(word *addr, mse *mark_stack_ptr,
-                               mse *mark_stack_limit, word env GC_ATTR_UNUSED)
+                               mse *mark_stack_limit, word env)
 {
   hdr *hhdr = HDR(addr);
   word sz = hhdr -> hb_sz;
@@ -667,6 +690,7 @@ STATIC mse *GC_array_mark_proc(word *addr, mse *mark_stack_ptr,
   mse *orig_mark_stack_ptr = mark_stack_ptr;
   mse *new_mark_stack_ptr;
 
+  UNUSED_ARG(env);
   if (NULL == complex_d) {
     /* Found a reference to a free list entry.  Ignore it. */
     return orig_mark_stack_ptr;

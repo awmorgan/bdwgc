@@ -17,7 +17,6 @@
 #ifdef ENABLE_DISCLAIM
 
 #include "gc/gc_disclaim.h"
-#include "gc/gc_inline.h" /* for GC_malloc_kind */
 #include "private/dbg_mlc.h" /* for oh type */
 
 #if defined(KEEP_BACK_PTRS) || defined(MAKE_BACK_GRAPH)
@@ -42,7 +41,7 @@ STATIC int GC_CALLBACK GC_finalized_disclaim(void *obj)
        /* on such fragments is always multiple of 4 (a link to the next */
        /* fragment, or NULL).  If it is desirable to have a finalizer   */
        /* which does not use the first word for storing finalization    */
-       /* info, GC_reclaim_with_finalization must be extended to clear  */
+       /* info, GC_disclaim_and_reclaim() must be extended to clear     */
        /* fragments so that the assumption holds for the selected word. */
         const struct GC_finalizer_closure *fc
                         = (struct GC_finalizer_closure *)(fc_word
@@ -53,10 +52,19 @@ STATIC int GC_CALLBACK GC_finalized_disclaim(void *obj)
     return 0;
 }
 
+STATIC void GC_register_disclaim_proc_inner(unsigned kind,
+                                            GC_disclaim_proc proc,
+                                            GC_bool mark_unconditionally)
+{
+    GC_ASSERT(kind < MAXOBJKINDS);
+    if (EXPECT(GC_find_leak, FALSE)) return;
+
+    GC_obj_kinds[kind].ok_disclaim_proc = proc;
+    GC_obj_kinds[kind].ok_mark_unconditionally = mark_unconditionally;
+}
+
 GC_API void GC_CALL GC_init_finalized_malloc(void)
 {
-    DCL_LOCK_STATE;
-
     GC_init();  /* In case it's not already done.       */
     LOCK();
     if (GC_finalized_kind != 0) {
@@ -79,20 +87,18 @@ GC_API void GC_CALL GC_init_finalized_malloc(void)
     GC_finalized_kind = GC_new_kind_inner(GC_new_free_list_inner(),
                                           GC_DS_LENGTH, TRUE, TRUE);
     GC_ASSERT(GC_finalized_kind != 0);
-    GC_register_disclaim_proc(GC_finalized_kind, GC_finalized_disclaim, TRUE);
+    GC_register_disclaim_proc_inner(GC_finalized_kind, GC_finalized_disclaim,
+                                    TRUE);
     UNLOCK();
 }
 
 GC_API void GC_CALL GC_register_disclaim_proc(int kind, GC_disclaim_proc proc,
                                               int mark_unconditionally)
 {
-    GC_ASSERT((unsigned)kind < MAXOBJKINDS);
-    GC_ASSERT(NONNULL_ARG_NOT_NULL(proc));
-    if (!EXPECT(GC_find_leak, FALSE)) {
-        GC_obj_kinds[kind].ok_disclaim_proc = proc;
-        GC_obj_kinds[kind].ok_mark_unconditionally =
-                                        (GC_bool)mark_unconditionally;
-    }
+    LOCK();
+    GC_register_disclaim_proc_inner((unsigned)kind, proc,
+                                    (GC_bool)mark_unconditionally);
+    UNLOCK();
 }
 
 GC_API GC_ATTR_MALLOC void * GC_CALL GC_finalized_malloc(size_t lb,
@@ -103,7 +109,8 @@ GC_API GC_ATTR_MALLOC void * GC_CALL GC_finalized_malloc(size_t lb,
     GC_ASSERT(GC_finalized_kind != 0);
     GC_ASSERT(NONNULL_ARG_NOT_NULL(fclos));
     GC_ASSERT(((word)fclos & FINALIZER_CLOSURE_FLAG) == 0);
-    op = GC_malloc_kind(SIZET_SAT_ADD(lb, sizeof(word)), GC_finalized_kind);
+    op = GC_malloc_kind(SIZET_SAT_ADD(lb, sizeof(word)),
+                        (int)GC_finalized_kind);
     if (EXPECT(NULL == op, FALSE))
         return NULL;
 #   ifdef AO_HAVE_store

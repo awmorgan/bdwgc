@@ -1,5 +1,6 @@
 language: cpp
 os: linux
+dist: jammy
 
 jobs:
   include:
@@ -50,48 +51,34 @@ jobs:
     env:
     - CSA_CHECK=true
     - CFLAGS_EXTRA="-D ALL_INTERIOR_POINTERS -D CHECKSUMS -D DBG_HDRS_ALL -D DEBUG_THREADS -D ENABLE_TRACE -D GC_ALWAYS_MULTITHREADED -D GC_ASSERTIONS -D GC_ATOMIC_UNCOLLECTABLE -D GC_ENABLE_SUSPEND_THREAD -D GC_GCJ_SUPPORT -D GC_PRINT_BACK_HEIGHT -D GC_THREADS -D HANDLE_FORK -D JAVA_FINALIZATION -D KEEP_BACK_PTRS -D MAKE_BACK_GRAPH -D PARALLEL_MARK -D PRINT_BLACK_LIST -D THREAD_LOCAL_ALLOC -D USE_MMAP -D USE_MUNMAP"
-  - env:
+  - dist: xenial
+    env:
     - CPPCHECK_ENABLE="--enable=unusedFunction -I libatomic_ops/src extra/gc.c tests/*.c"
-  - env:
+  - dist: xenial
+    env:
     - CPPCHECK_ENABLE="--enable=unusedFunction --force -D GC_BUILTIN_ATOMIC *.cc cord/*.c cord/tests/*.c tests/*.c tests/*.cc"
     - CPPCHECK_OUT_FILTER="Z"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - env:
+  - dist: xenial
+    env:
     - CPPCHECK_ENABLE="-j4 --enable=information,performance,portability,style,warning --force -U GC_PRIVATE_H -I libatomic_ops/src *.c"
-  - env:
+  - dist: xenial
+    env:
     - CPPCHECK_ENABLE="-j4 --enable=information,performance,portability,style,warning --force -U GC_PRIVATE_H -I libatomic_ops/src *.cc cord/*.c cord/tests/*.c extra/AmigaOS.c extra/MacOS.c extra/msvc_dbg.c extra/symbian.cpp tests/*.c tests/*.cc tools/*.c"
   - arch: arm64
     compiler: clang
   - arch: arm64
     compiler: gcc
-  - addons:
-      apt:
-        packages:
-        - clang-12
-        sources:
-        - ubuntu-toolchain-r-test
-    arch: arm64
-    compiler: clang-12
-    dist: focal
+  - arch: arm64
+    compiler: clang
     env:
-    - CC=clang-12
-    - CXX=clang++-12
     - CFLAGS_EXTRA="-O3"
     - CONF_OPTIONS="--enable-gc-assertions --enable-cplusplus --disable-shared"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - addons:
-      apt:
-        packages:
-        - g++-11
-        sources:
-        - ubuntu-toolchain-r-test
-    arch: arm64
-    compiler: g++-11
-    dist: bionic
+  - arch: arm64
+    compiler: gcc
     env:
-    - CC=gcc-11
-    - CXX=g++-11
-    - CFLAGS_EXTRA="-O3 -D SIMULATE_LOST_SIGNALS"
+    - CFLAGS_EXTRA="-O3 -D SIMULATE_LOST_SIGNALS -D TRACE_BUF"
     - CONF_OPTIONS="--enable-cplusplus --disable-gcj-support"
     - NO_CLONE_LIBATOMIC_OPS=true
   - addons:
@@ -100,6 +87,7 @@ jobs:
         - musl-tools
     arch: arm64
     compiler: musl-gcc
+    dist: focal
     language: c
     env:
     - CFLAGS_EXTRA="-O3 -D SOFT_VDB"
@@ -119,15 +107,8 @@ jobs:
     env:
     - CONF_OPTIONS="--with-libatomic-ops=yes --enable-gc-assertions --enable-cplusplus --disable-munmap"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - addons:
-      apt:
-        packages:
-        - clang-12
-        sources:
-        - ubuntu-toolchain-r-test
-    arch: arm64
-    compiler: clang-12
-    dist: focal
+  - arch: arm64
+    compiler: clang
     language: c
     env:
     - CFLAGS_EXTRA="-fsanitize=memory,undefined -fno-omit-frame-pointer"
@@ -151,45 +132,26 @@ jobs:
     env:
     - CONF_OPTIONS="--disable-disclaim"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - addons:
-      apt:
-        packages:
-        - clang-12
-        sources:
-        - ubuntu-toolchain-r-test
-    arch: ppc64le
-    compiler: clang-12
-    dist: focal
+  - arch: ppc64le
+    compiler: clang
     env:
-    - CC=clang-12
-    - CXX=clang++-12
     - CFLAGS_EXTRA="-O3 -D _FORTIFY_SOURCE=2 -D FORCE_MPROTECT_BEFORE_MADVISE"
     - CONF_OPTIONS="--enable-gc-assertions --enable-cplusplus --enable-static"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - addons:
-      apt:
-        packages:
-        - g++-11
-        sources:
-        - ubuntu-toolchain-r-test
-    arch: ppc64le
-    compiler: g++-11
-    dist: bionic
+  - arch: ppc64le
+    compiler: gcc
     env:
-    - CC=gcc-11
-    - CXX=g++-11
     - CFLAGS_EXTRA="-O3 -D NO_MPROTECT_VDB"
     - CONF_OPTIONS="--enable-cplusplus"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - addons:
-      apt:
-        packages:
-        - clang-12
-        sources:
-        - ubuntu-toolchain-r-test
-    arch: ppc64le
-    compiler: clang-12
-    dist: focal
+  - arch: ppc64le
+    compiler: clang
+    env:
+    - CFLAGS_EXTRA="-D CHECK_SOFT_VDB"
+    - CONF_OPTIONS="--enable-gc-assertions --enable-static --disable-thread-local-alloc"
+    - NO_CLONE_LIBATOMIC_OPS=true
+  - arch: ppc64le
+    compiler: clang
     language: c
     env:
     - CFLAGS_EXTRA="-fsanitize=memory,undefined -fno-omit-frame-pointer"
@@ -208,14 +170,14 @@ jobs:
     - MAKEFILE_TARGETS="check cord/de"
   - arch: s390x
     compiler: clang
+    dist: focal
   - arch: s390x
     compiler: gcc
+    dist: focal
   - addons:
       apt:
         packages:
         - clang-12
-        sources:
-        - ubuntu-toolchain-r-test
     arch: s390x
     compiler: clang-12
     dist: focal
@@ -227,20 +189,19 @@ jobs:
   - addons:
       apt:
         packages:
-        - g++-11
-        sources:
-        - ubuntu-toolchain-r-test
+        - g++-10
     arch: s390x
-    compiler: g++-11
-    dist: bionic
+    compiler: g++-10
+    dist: focal
     env:
-    - CC=gcc-11
-    - CXX=g++-11
+    - CC=gcc-10
+    - CXX=g++-10
     - CFLAGS_EXTRA="-O3 -flto=auto -D _FORTIFY_SOURCE=2 -D PREFER_MMAP_PROT_NONE"
     - CONF_OPTIONS="--enable-cplusplus --disable-shared"
     - NO_CLONE_LIBATOMIC_OPS=true
   - arch: s390x
     compiler: gcc
+    dist: focal
     env:
     - MAKEFILE_NAME=Makefile.direct
     - MAKEFILE_TARGETS="check cord/de"
@@ -272,17 +233,8 @@ jobs:
     - MAKEFILE_NAME=Makefile.direct
     - MAKEFILE_TARGETS="check cord/de"
     - MAKE_NPROC=8
-  - addons:
-      apt:
-        packages:
-        - g++-11
-        sources:
-        - ubuntu-toolchain-r-test
-    compiler: g++-11
-    dist: bionic
+  - compiler: gcc
     env:
-    - CC=gcc-11
-    - CXX=g++-11
     - CFLAGS_EXTRA="-O3 -march=native"
     - CONF_OPTIONS="--enable-cplusplus"
     - NO_CLONE_LIBATOMIC_OPS=true
@@ -324,7 +276,7 @@ jobs:
     - NO_CLONE_LIBATOMIC_OPS=true
   - os: osx
     env:
-    - CFLAGS_EXTRA="-D DBG_HDRS_ALL -D SHORT_DBG_HDRS -D LINT2"
+    - CFLAGS_EXTRA="-D DBG_HDRS_ALL -D SHORT_DBG_HDRS -D LINT2 -D PRINT_AND_CHECK_INT_LIST"
     - CONF_OPTIONS="--enable-gc-assertions --enable-cplusplus --enable-handle-fork=manual --disable-throw-bad-alloc-library"
     - NO_CLONE_LIBATOMIC_OPS=true
   - compiler: gcc
@@ -354,7 +306,7 @@ jobs:
     - CONF_OPTIONS="--without-libatomic-ops --enable-munmap --enable-cplusplus --enable-static"
   - compiler: gcc
     env:
-    - CONF_CFLAGS="-D _FORTIFY_SOURCE=2 -D AO_USE_PTHREAD_DEFS"
+    - CONF_CFLAGS="-O3 -D _FORTIFY_SOURCE=2 -D AO_USE_PTHREAD_DEFS -D RANDOM_ONE_CPU_CORE"
     - CONF_OPTIONS="--without-libatomic-ops --enable-gc-assertions --enable-cplusplus --enable-static"
   - compiler: clang
     env:
@@ -366,7 +318,7 @@ jobs:
         - libatomic-ops-dev
     compiler: gcc
     env:
-    - CONF_CFLAGS="-D AO_USE_PTHREAD_DEFS"
+    - CONF_CFLAGS="-O3 -D AO_USE_PTHREAD_DEFS -D RANDOM_ONE_CPU_CORE"
     - CONF_OPTIONS="--with-libatomic-ops=yes --enable-cplusplus"
     - CFLAGS_EXTRA="-D GC_NO_FINALIZATION"
     - NO_CLONE_LIBATOMIC_OPS=true
@@ -376,7 +328,7 @@ jobs:
         - libatomic-ops-dev
     compiler: clang
     env:
-    - CONF_CFLAGS="-D AO_USE_PTHREAD_DEFS"
+    - CONF_CFLAGS="-O3 -D AO_USE_PTHREAD_DEFS -D RANDOM_ONE_CPU_CORE"
     - CONF_OPTIONS="--with-libatomic-ops=yes --enable-gc-assertions --enable-cplusplus --disable-shared --enable-static"
     - NO_CLONE_LIBATOMIC_OPS=true
   - compiler: gcc
@@ -461,7 +413,7 @@ jobs:
   - compiler: gcc
     env:
     - CONF_OPTIONS="--enable-large-config --enable-cplusplus --enable-gc-assertions --enable-static"
-    - CFLAGS_EXTRA="-D LINT2 -D NO_VDB_FOR_STATIC_ROOTS"
+    - CFLAGS_EXTRA="-D LINT2 -D NO_VDB_FOR_STATIC_ROOTS -D TEST_REUSE_SIG_SUSPEND"
   - compiler: gcc
     env:
     - CONF_OPTIONS="--enable-large-config --enable-redirect-malloc --disable-threads"
@@ -553,6 +505,7 @@ jobs:
     env:
     - CONF_OPTIONS="--disable-parallel-mark --enable-gc-assertions"
   - compiler: clang
+    dist: xenial
     env:
     - CFLAGS_EXTRA="-fsanitize=address -fno-common -fno-omit-frame-pointer"
     - CONF_OPTIONS="--enable-cplusplus --enable-static"
@@ -565,6 +518,7 @@ jobs:
         sources:
         - ubuntu-toolchain-r-test
     compiler: gcc-5
+    dist: xenial
     language: c
     env:
     - CFLAGS_EXTRA="-fsanitize=address -O0"
@@ -588,14 +542,7 @@ jobs:
     - TESTS_CUSTOM_RUN=true
     - CONF_OPTIONS="--enable-cplusplus --enable-static"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - addons:
-      apt:
-        packages:
-        - gcc-11
-        sources:
-        - ubuntu-toolchain-r-test
-    compiler: gcc-11
-    dist: bionic
+  - compiler: gcc
     env:
     - CFLAGS_EXTRA="-fsanitize=thread -fno-omit-frame-pointer"
     - CONF_OPTIONS="--enable-gc-assertions"
@@ -604,8 +551,6 @@ jobs:
       apt:
         packages:
         - clang-12
-        sources:
-        - ubuntu-toolchain-r-test
     compiler: clang-12
     dist: focal
     language: c
@@ -614,15 +559,18 @@ jobs:
     - CONF_OPTIONS="--enable-static"
     - NO_CLONE_LIBATOMIC_OPS=true
   - compiler: clang
+    dist: focal
     env:
     - CFLAGS_EXTRA="-fsanitize=thread -D NO_INCREMENTAL -fno-omit-frame-pointer -D TEST_FORK_WITHOUT_ATFORK"
     - CONF_OPTIONS="--enable-gc-assertions --enable-handle-fork=manual"
     - NO_CLONE_LIBATOMIC_OPS=true
   - compiler: clang
+    dist: focal
     env:
     - CFLAGS_EXTRA="-fsanitize=thread -D NO_INCREMENTAL -fno-omit-frame-pointer -D TEST_FORK_WITHOUT_ATFORK"
     - CONF_OPTIONS="--enable-gc-assertions --enable-gc-debug --enable-handle-fork=manual --enable-large-config --without-libatomic-ops"
   - compiler: clang
+    dist: xenial
     env:
     - CFLAGS_EXTRA="-fsanitize=thread -fno-omit-frame-pointer -D NTHREADS=10"
     - CONF_OPTIONS="--disable-parallel-mark"
@@ -645,29 +593,15 @@ jobs:
     - CFLAGS_EXTRA="-m32 -D _FORTIFY_SOURCE=2 -D GC_DISABLE_INCREMENTAL -std=gnu11"
     - CONF_OPTIONS="--enable-gc-assertions --enable-gc-debug"
     - NO_CLONE_LIBATOMIC_OPS=true
-  - addons:
-      apt:
-        packages:
-        - gcc-8
-        - g++-8
-        sources:
-        - ubuntu-toolchain-r-test
-    compiler: gcc-8
-    language: c
+  - compiler: gcc
     env:
-    - CXX=g++-8
     - CONF_OPTIONS="--enable-cplusplus --enable-gc-assertions --enable-static"
     - NO_CLONE_LIBATOMIC_OPS=true
   - addons:
       apt:
         packages:
-        - gcc-8
-        - gcc-8-multilib
         - gcc-multilib
-        sources:
-        - ubuntu-toolchain-r-test
-    compiler: gcc-8
-    language: c
+    compiler: gcc
     env:
     - CFLAGS_EXTRA="-m32 -O3 -std=gnu11"
     - CONF_OPTIONS="--disable-shared --enable-static --enable-single-obj-compilation"
@@ -678,9 +612,8 @@ jobs:
         - gcc-8
         - gcc-8-multilib
         - gcc-multilib
-        sources:
-        - ubuntu-toolchain-r-test
     compiler: gcc-8
+    dist: focal
     language: c
     env:
     - CFLAGS_EXTRA="-mx32 -march=native -D _FORTIFY_SOURCE=2"
@@ -720,7 +653,7 @@ jobs:
     language: c
     env:
     - CXX=x86_64-w64-mingw32-g++
-    - CONF_OPTIONS="--host=x86_64-w64-mingw32 --enable-cplusplus --enable-static"
+    - CONF_OPTIONS="--host=x86_64-w64-mingw32 --enable-cplusplus --disable-shared"
     - MAKEFILE_TARGETS="all"
   - addons:
       apt:
@@ -744,8 +677,10 @@ jobs:
   - dist: focal
     env:
     - MAKEFILE_TARGETS="distcheck"
+    - AUTOCONF_VER=2.71
     - AUTOMAKE_VER=1.16.5
-    - LIBTOOL_VER=2.4.6
+    - LIBTOOL_VER=2.4.7
+    - M4_VER=1.4.19
     - NO_CLONE_LIBATOMIC_OPS=true
 
 before_install:
@@ -755,8 +690,8 @@ before_install:
             ~/cppcheck -b $CPPCHECK_VER;
     make --directory ~/cppcheck -j8 CXXFLAGS="-O3 -march=native -D NDEBUG";
   fi
-- if [[ "$AUTOMAKE_VER" != "" || "$LIBTOOL_VER" != ""
-        || "$M4_VER" != "" ]]; then
+- if [[ "$AUTOCONF_VER" != "" || "$AUTOMAKE_VER" != ""
+        || "$LIBTOOL_VER" != "" || "$M4_VER" != "" ]]; then
     GNUTOOLS_ROOT=`pwd`/../gnu-tools;
     export PATH=$GNUTOOLS_ROOT/bin:$PATH;
     GNU_DOWNLOAD_SITE=https://ftp.gnu.org/gnu;
@@ -764,12 +699,17 @@ before_install:
 - if [[ "$M4_VER" != "" ]]; then
     M4_XZ_URL=$GNU_DOWNLOAD_SITE/m4/m4-$M4_VER.tar.xz;
     wget -O - $M4_XZ_URL | tar xf - --xz --directory ~;
-    (cd ~/m4-$M4_VER && ./configure --prefix=$GNUTOOLS_ROOT && make -j check && make install);
+    (cd ~/m4-$M4_VER && ./configure --prefix=$GNUTOOLS_ROOT && make -j && make install);
   fi
 - if [[ "$LIBTOOL_VER" != "" ]]; then
     LIBTOOL_XZ_URL=$GNU_DOWNLOAD_SITE/libtool/libtool-$LIBTOOL_VER.tar.xz;
     wget -O - $LIBTOOL_XZ_URL | tar xf - --xz --directory ~;
     (cd ~/libtool-$LIBTOOL_VER && ./configure --prefix=$GNUTOOLS_ROOT && make -j && make install);
+  fi
+- if [[ "$AUTOCONF_VER" != "" ]]; then
+    AUTOCONF_XZ_URL=$GNU_DOWNLOAD_SITE/autoconf/autoconf-$AUTOCONF_VER.tar.xz;
+    wget -O - $AUTOCONF_XZ_URL | tar xf - --xz --directory ~;
+    (cd ~/autoconf-$AUTOCONF_VER && ./configure --prefix=$GNUTOOLS_ROOT && make -j && make install);
   fi
 - if [[ "$AUTOMAKE_VER" != "" ]]; then
     AUTOMAKE_XZ_URL=$GNU_DOWNLOAD_SITE/automake/automake-$AUTOMAKE_VER.tar.xz;
@@ -830,11 +770,12 @@ script:
 - if [ -f threadleaktest.log ]; then cat threadleaktest.log; fi
 - if [ -f weakmaptest.log ]; then cat weakmaptest.log; fi
 - if [[ "$CSA_CHECK" == true ]]; then
-    ${CC} --analyze -Xanalyzer -analyzer-output=text -Werror
+    set -o pipefail; ${CC} --analyze -Xanalyzer -analyzer-output=text -Werror
         -I include -I libatomic_ops/src $CFLAGS_EXTRA
         *.c *.cc cord/*.c cord/tests/cordtest.c cord/tests/de.c extra/gc.c
         extra/msvc_dbg.c extra/pcr_interface.c extra/real_malloc.c
-        tests/*.c tests/*.cc tools/*.c;
+        tests/*.c tests/*.cc tools/*.c 2>&1 | tee clang-analyzer-output.log;
+    if [ -s clang-analyzer-output.log ]; then exit 1; fi;
   fi
 - if [[ "$CPPCHECK_ENABLE" != "" ]]; then
     if [[ "$CPPCHECK_OUT_FILTER" == "" ]]; then CPPCHECK_OUT_FILTER="c "; fi;

@@ -30,8 +30,8 @@ set(PACKAGE_VERSION 8.3.0)
 
 # Info (current:revision:age) for the Libtool versioning system.
 # These values should match those in cord/cord.am and Makefile.am.
-set(LIBCORD_VER_INFO    5:0:4)
-set(LIBGC_VER_INFO      6:0:5)
+set(LIBCORD_VER_INFO    6:0:5)
+set(LIBGC_VER_INFO      6:1:5)
 set(LIBGCCPP_VER_INFO   6:0:5)
 
 option(enable_cplusplus "C++ support" OFF)
@@ -39,6 +39,11 @@ if (enable_cplusplus)
   project(gc)
 else()
   project(gc C)
+endif()
+
+if (POLICY CMP0057)
+  # Required for CheckLinkerFlag, at least.
+  cmake_policy(SET CMP0057 NEW)
 endif()
 
 include(CheckCCompilerFlag)
@@ -50,12 +55,22 @@ include(CMakePackageConfigHelpers)
 include(CTest)
 include(GNUInstallDirs)
 
+if (NOT (${CMAKE_VERSION} VERSION_LESS "3.18.0"))
+  include(CheckLinkerFlag)
+endif()
+
+set(default_enable_threads ON)
+find_package(Threads QUIET)
+if (NOT (CMAKE_USE_PTHREADS_INIT OR CMAKE_USE_WIN32_THREADS_INIT) OR EMSCRIPTEN OR WASI)
+  set(default_enable_threads OFF)
+endif()
+
 # Customize the build by passing "-D<option_name>=ON|OFF" in the command line.
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(build_cord "Build cord library" ON)
 option(build_tests "Build tests" OFF)
 option(enable_docs "Build and install documentation" ON)
-option(enable_threads "Support threads" ON)
+option(enable_threads "Support threads" ${default_enable_threads})
 option(enable_parallel_mark "Parallelize marking and free list construction" ON)
 option(enable_thread_local_alloc "Turn on thread-local allocation optimization" ON)
 option(enable_threads_discovery "Enable threads discovery in GC" ON)
@@ -77,8 +92,10 @@ option(enable_register_main_static_data "Perform the initial guess of data root 
 option(enable_checksums "Report erroneously cleared dirty bits" OFF)
 option(enable_werror "Pass -Werror to the C compiler (treat warnings as errors)" OFF)
 option(enable_single_obj_compilation "Compile all libgc source files into single .o" OFF)
+option(disable_single_obj_compilation "Compile each libgc source file independently" OFF)
 option(enable_handle_fork "Attempt to ensure a usable collector after fork()" ON)
 option(disable_handle_fork "Prohibit installation of pthread_atfork() handlers" OFF)
+option(enable_emscripten_asyncify "Use Emscripten asyncify feature" OFF)
 option(install_headers "Install header and pkg-config metadata files" ON)
 option(with_libatomic_ops "Use an external libatomic_ops" OFF)
 option(without_libatomic_ops "Use atomic_ops.h in libatomic_ops/src" OFF)
@@ -129,18 +146,21 @@ endif()
 # Output all warnings.
 if (BORLAND)
   # All warnings except for particular ones.
-  add_compile_options(/w /w-pro /w-aus /w-par /w-ccc /w-inl /w-rch)
+  add_compile_options(/w /w-aus /w-ccc /w-inl /w-pro /w-rch)
 elseif (MSVC)
-  # All warnings but ignoring "unreferenced formal parameter" and
-  # "conditional expression is constant" ones.
-  add_compile_options(/W4 /wd4100 /wd4127)
+  # All warnings but ignoring "conditional expression is constant" one.
+  add_compile_options(/W4 /wd4127)
   # Disable crt security warnings, since unfortunately they warn about all
   # sorts of safe uses of strncpy.
   add_definitions("-D_CRT_SECURE_NO_DEPRECATE")
 elseif (WATCOM)
   add_compile_options(/wx)
+  if (NOT enable_threads)
+    # Suppress "unreachable code" warning in GC_ASSERT(I_HOLD_LOCK()).
+    add_compile_options(/wcd=201)
+  endif()
 else()
-  # TODO add -[W]pedantic -Wno-long-long
+  # TODO: add -[W]pedantic -Wno-long-long
   add_compile_options(-Wall -Wextra)
 endif()
 
@@ -203,71 +223,70 @@ if (enable_threads)
   else()
     set(THREADDLLIBS_LIST ${THREADDLLIBS_LIST} ${CMAKE_DL_LIBS})
   endif()
-endif(enable_threads)
-
-# Thread support detection.
-if (CMAKE_USE_PTHREADS_INIT)
-  set(SRC ${SRC} gc_dlopen.c)
-  if (CYGWIN OR MSYS)
-    set(SRC ${SRC} win32_threads.c)
-  else()
-    set(SRC ${SRC} pthread_start.c pthread_support.c)
-    if (APPLE)
-      set(SRC ${SRC} darwin_stop_world.c)
+  # Thread support detection.
+  if (CMAKE_USE_PTHREADS_INIT)
+    set(SRC ${SRC} gc_dlopen.c pthread_start.c pthread_support.c)
+    if (CYGWIN OR MSYS)
+      set(SRC ${SRC} win32_threads.c)
     else()
-      set(SRC ${SRC} pthread_stop_world.c)
+      if (APPLE)
+        set(SRC ${SRC} darwin_stop_world.c)
+      else()
+        set(SRC ${SRC} pthread_stop_world.c)
+      endif()
     endif()
+    if (HOST MATCHES .*-.*-hpux10.*)
+      message(FATAL_ERROR "HP/UX 10 POSIX threads are not supported.")
+    endif()
+    # Common defines for POSIX platforms.
+    add_definitions("-DGC_THREADS -D_REENTRANT")
+    if (enable_parallel_mark)
+      add_definitions("-DPARALLEL_MARK")
+    endif()
+    if (enable_thread_local_alloc)
+      add_definitions("-DTHREAD_LOCAL_ALLOC")
+      set(SRC ${SRC} specific.c thread_local_alloc.c)
+    endif()
+    message("Explicit GC_INIT() calls may be required.")
+    if (HOST MATCHES .*-.*-hpux11.*)
+      message("Only HP/UX 11 POSIX threads are supported.")
+      add_definitions("-D_POSIX_C_SOURCE=199506L")
+      set(NEED_LIB_RT ON)
+    elseif (HOST MATCHES .*-.*-netbsd.*)
+      message("Only on NetBSD 2.0 or later.")
+      add_definitions("-D_PTHREADS")
+      set(NEED_LIB_RT ON)
+    elseif (CMAKE_C_COMPILER_ID STREQUAL "SunPro")
+      set(NEED_LIB_RT ON)
+    endif()
+    if (MSYS)
+      # Does not provide process fork functionality.
+    elseif (APPLE)
+      # The incremental mode conflicts with fork handling (for now).
+      # Thus, HANDLE_FORK is not defined.
+    elseif (enable_handle_fork AND NOT disable_handle_fork)
+      add_definitions("-DHANDLE_FORK")
+    endif()
+    if (enable_sigrt_signals)
+      add_definitions("-DGC_USESIGRT_SIGNALS")
+    endif()
+  elseif (CMAKE_USE_WIN32_THREADS_INIT)
+    add_definitions("-DGC_THREADS")
+    if (enable_parallel_mark)
+      add_definitions("-DPARALLEL_MARK")
+    endif()
+    if (enable_thread_local_alloc AND (enable_parallel_mark OR NOT BUILD_SHARED_LIBS))
+      # Imply THREAD_LOCAL_ALLOC unless GC_DLL.
+      add_definitions("-DTHREAD_LOCAL_ALLOC")
+      set(SRC ${SRC} thread_local_alloc.c)
+    endif()
+    add_definitions("-DEMPTY_GETENV_RESULTS")
+    set(SRC ${SRC} pthread_start.c) # in case client defines GC_WIN32_PTHREADS
+    set(SRC ${SRC} pthread_support.c win32_threads.c)
+  elseif (CMAKE_HP_PTHREADS_INIT OR CMAKE_USE_SPROC_INIT)
+    message(FATAL_ERROR "Unsupported thread package")
   endif()
-  if (HOST MATCHES .*-.*-hpux10.*)
-    message(FATAL_ERROR "HP/UX 10 POSIX threads are not supported.")
-  endif()
-  # Common defines for POSIX platforms.
-  add_definitions("-DGC_THREADS -D_REENTRANT")
-  if (enable_parallel_mark)
-    add_definitions("-DPARALLEL_MARK")
-  endif()
-  if (enable_thread_local_alloc)
-    add_definitions("-DTHREAD_LOCAL_ALLOC")
-    set(SRC ${SRC} specific.c thread_local_alloc.c)
-  endif()
-  message("Explicit GC_INIT() calls may be required.")
-  if (HOST MATCHES .*-.*-hpux11.*)
-    message("Only HP/UX 11 POSIX threads are supported.")
-    add_definitions("-D_POSIX_C_SOURCE=199506L")
-    set(NEED_LIB_RT ON)
-  elseif (HOST MATCHES .*-.*-netbsd.*)
-    message("Only on NetBSD 2.0 or later.")
-    add_definitions("-D_PTHREADS")
-    set(NEED_LIB_RT ON)
-  elseif (CMAKE_C_COMPILER_ID STREQUAL "SunPro")
-    set(NEED_LIB_RT ON)
-  endif()
-  if (MSYS)
-    # Does not provide process fork functionality.
-  elseif (APPLE)
-    # The incremental mode conflicts with fork handling (for now).
-    # Thus, HANDLE_FORK is not defined.
-  elseif (enable_handle_fork AND NOT disable_handle_fork)
-    add_definitions("-DHANDLE_FORK")
-  endif()
-  if (enable_sigrt_signals)
-    add_definitions("-DGC_USESIGRT_SIGNALS")
-  endif()
-elseif (CMAKE_USE_WIN32_THREADS_INIT)
-  add_definitions("-DGC_THREADS")
-  if (enable_parallel_mark)
-    add_definitions("-DPARALLEL_MARK")
-  endif()
-  if (enable_thread_local_alloc AND (enable_parallel_mark OR NOT BUILD_SHARED_LIBS))
-    # Imply THREAD_LOCAL_ALLOC unless GC_DLL.
-    add_definitions("-DTHREAD_LOCAL_ALLOC")
-    set(SRC ${SRC} thread_local_alloc.c)
-  endif()
-  add_definitions("-DEMPTY_GETENV_RESULTS")
-  set(SRC ${SRC} win32_threads.c)
-elseif (CMAKE_HP_PTHREADS_INIT OR CMAKE_USE_SPROC_INIT)
-  message(FATAL_ERROR "Unsupported thread package")
-endif()
+endif(enable_threads)
 
 # Check whether -lrt linker option is needed to use clock_gettime.
 if (NOT NEED_LIB_RT)
@@ -362,6 +381,8 @@ endif()
 
 if (enable_gc_assertions)
   add_definitions("-DGC_ASSERTIONS")
+  # TODO: pass -Wno-missing-prototypes (if supported) to turn off the clang
+  # warning for STATIC functions.
 endif()
 
 if (NOT enable_threads_discovery)
@@ -379,6 +400,11 @@ endif(enable_checksums)
 if (enable_werror)
   if (BORLAND)
     add_compile_options(/w!)
+    if (enable_threads)
+      # Workaround "function should return a value" warning for several
+      # asm functions in atomic_ops/sysdeps/msftc/x86.h.
+      add_compile_options(/w-rvl)
+    endif(enable_threads)
   elseif (MSVC)
     add_compile_options(/WX)
     # Workaround "typedef ignored on left of ..." warning reported in
@@ -395,9 +421,9 @@ if (enable_werror)
   endif()
 endif(enable_werror)
 
-if (enable_single_obj_compilation OR BUILD_SHARED_LIBS)
+if (enable_single_obj_compilation OR (BUILD_SHARED_LIBS AND NOT disable_single_obj_compilation))
   set(SRC extra/gc.c) # override SRC
-  if (CMAKE_USE_PTHREADS_INIT AND NOT (APPLE OR CYGWIN OR MSYS))
+  if (enable_threads AND CMAKE_USE_PTHREADS_INIT AND NOT (APPLE OR CYGWIN OR MSYS))
     add_definitions("-DGC_PTHREAD_START_STANDALONE")
     set(SRC ${SRC} pthread_start.c)
   endif()
@@ -411,6 +437,18 @@ if (MSVC)
   set(SRC ${SRC} extra/msvc_dbg.c)
 endif()
 
+# Declare that the libraries do not refer to external symbols.
+if (BUILD_SHARED_LIBS AND NOT (APPLE OR ${CMAKE_SYSTEM_NAME} MATCHES "BSD"))
+  # Note: performed before CMAKE_REQUIRED_FLAGS is updated with "-c".
+  if (${CMAKE_VERSION} VERSION_LESS "3.18.0")
+    set(WL_NO_UNDEFINED_OPT "-Wl,--no-undefined")
+    check_c_compiler_flag(${WL_NO_UNDEFINED_OPT} HAVE_FLAG_WL_NO_UNDEFINED)
+  else()
+    set(WL_NO_UNDEFINED_OPT "LINKER:--no-undefined")
+    check_linker_flag(C "${WL_NO_UNDEFINED_OPT}" HAVE_FLAG_WL_NO_UNDEFINED)
+  endif()
+endif()
+
 # Instruct check_c_source_compiles to skip linking.
 # Alternatively, we could set CMAKE_REQUIRED_LIBRARIES properly.
 SET(CMAKE_REQUIRED_FLAGS "-c")
@@ -420,7 +458,14 @@ SET(CMAKE_REQUIRED_FLAGS "-c")
 if (NOT BORLAND AND NOT MSVC AND NOT WATCOM)
   check_c_compiler_flag(-Werror HAVE_FLAG_WERROR)
   if (HAVE_FLAG_WERROR)
+    check_c_compiler_flag(-Wno-unused-command-line-argument
+                          HAVE_FLAG_WNO_UNUSED_CMDLINE_ARG)
     SET(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -Werror")
+    # Prevent "linker input unused" error in further check_c_compiler_flag.
+    if (HAVE_FLAG_WNO_UNUSED_CMDLINE_ARG)
+      SET(CMAKE_REQUIRED_FLAGS
+          "${CMAKE_REQUIRED_FLAGS} -Wno-unused-command-line-argument")
+    endif()
   endif(HAVE_FLAG_WERROR)
 endif()
 
@@ -434,7 +479,6 @@ if (BUILD_SHARED_LIBS)
   else()
     add_definitions("-DGC_NO_VISIBILITY")
   endif()
-  check_c_compiler_flag(-Wl,--no-undefined HAVE_FLAG_WL_NO_UNDEFINED)
 else()
   add_definitions("-DGC_NOT_DLL")
   if (WIN32)
@@ -462,16 +506,43 @@ if (NOT HAVE_EXECINFO_H)
   add_definitions("-DGC_MISSING_EXECINFO_H")
 endif()
 
+check_include_file(sys/types.h HAVE_SYS_TYPES_H)
+if (HAVE_SYS_TYPES_H)
+  add_definitions("-DHAVE_SYS_TYPES_H")
+endif()
+
+if (NOT WIN32)
+  check_include_file(unistd.h HAVE_UNISTD_H)
+  if (HAVE_UNISTD_H)
+    add_definitions("-DHAVE_UNISTD_H")
+  endif()
+endif()
+
 # Check for getcontext (uClibc can be configured without it, for example).
-check_function_exists(getcontext HAVE_GETCONTEXT)
-if (NOT HAVE_GETCONTEXT)
-  add_definitions("-DNO_GETCONTEXT")
+if (NOT (BORLAND OR MSVC))
+  check_function_exists(getcontext HAVE_GETCONTEXT)
+  if (HAVE_GETCONTEXT AND NOT APPLE)
+    # Double check getcontext() is available (needed at least on OpenBSD 7.3).
+    # Note: OS X is excluded here because the header filename differs.
+    check_c_source_compiles("
+#include <ucontext.h>\n
+int main(void) { ucontext_t ctxt; (void)getcontext(&ctxt); return 0; }"
+      HAVE_GETCONTEXT_FUNC)
+    if (NOT HAVE_GETCONTEXT_FUNC)
+      set(HAVE_GETCONTEXT OFF)
+    endif()
+  endif()
+  if (NOT HAVE_GETCONTEXT)
+    add_definitions("-DNO_GETCONTEXT")
+  endif()
 endif()
 
 # Check whether dl_iterate_phdr exists (as a strong symbol).
-check_function_exists(dl_iterate_phdr HAVE_DL_ITERATE_PHDR)
-if (HAVE_DL_ITERATE_PHDR)
-  add_definitions("-DHAVE_DL_ITERATE_PHDR")
+if (NOT (APPLE OR CYGWIN OR WIN32))
+  check_function_exists(dl_iterate_phdr HAVE_DL_ITERATE_PHDR)
+  if (HAVE_DL_ITERATE_PHDR)
+    add_definitions("-DHAVE_DL_ITERATE_PHDR")
+  endif(HAVE_DL_ITERATE_PHDR)
 endif()
 
 check_symbol_exists(sigsetjmp setjmp.h HAVE_SIGSETJMP)
@@ -479,9 +550,16 @@ if (NOT HAVE_SIGSETJMP)
   add_definitions("-DGC_NO_SIGSETJMP")
 endif()
 
+# Build with GC_wcsdup() support if possible.
+check_symbol_exists(wcslen wchar.h HAVE_WCSLEN)
+if (HAVE_WCSLEN)
+  add_definitions("-DGC_REQUIRE_WCSDUP")
+endif()
+
 # pthread_setname_np, if available, may have 1, 2 or 3 arguments.
-if (CMAKE_USE_PTHREADS_INIT)
+if (enable_threads AND CMAKE_USE_PTHREADS_INIT)
   check_c_source_compiles("
+#define _GNU_SOURCE 1\n
 #include <pthread.h>\n
 int main(void) { (void)pthread_setname_np(\"thread-name\"); return 0; }"
     HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID)
@@ -490,6 +568,7 @@ int main(void) { (void)pthread_setname_np(\"thread-name\"); return 0; }"
     add_definitions("-DHAVE_PTHREAD_SETNAME_NP_WITHOUT_TID")
   else()
     check_c_source_compiles("
+#define _GNU_SOURCE 1\n
 #include <pthread.h>\n
 int main(void) {\n
   (void)pthread_setname_np(pthread_self(), \"thread-name-%u\", 0); return 0; }"
@@ -499,9 +578,7 @@ int main(void) {\n
       add_definitions("-DHAVE_PTHREAD_SETNAME_NP_WITH_TID_AND_ARG")
     else()
       check_c_source_compiles("
-#if defined(__linux__) || defined(__GLIBC__) || defined(__GNU__) || defined(__CYGWIN__)\n
 #define _GNU_SOURCE 1\n
-#endif\n
 #include <pthread.h>\n
 int main(void) {\n
   (void)pthread_setname_np(pthread_self(), \"thread-name\"); return 0; }"
@@ -509,7 +586,18 @@ int main(void) {\n
       if (HAVE_PTHREAD_SETNAME_NP_WITH_TID)
         # Define to use 'pthread_setname_np(pthread_t, const char*)' function.
         add_definitions("-DHAVE_PTHREAD_SETNAME_NP_WITH_TID")
-      endif()
+      else()
+        check_c_source_compiles("
+#include <pthread.h>\n
+#include <pthread_np.h>\n
+int main(void) {\n
+  pthread_set_name_np(pthread_self(), \"thread-name\"); return 0; }"
+          HAVE_PTHREAD_SET_NAME_NP)
+        if (HAVE_PTHREAD_SET_NAME_NP)
+          # Define to use 'pthread_set_name_np(pthread_t, const char*)'.
+          add_definitions("-DHAVE_PTHREAD_SET_NAME_NP")
+        endif()
+      endif(HAVE_PTHREAD_SETNAME_NP_WITH_TID)
     endif(HAVE_PTHREAD_SETNAME_NP_WITH_TID_AND_ARG)
   endif (HAVE_PTHREAD_SETNAME_NP_WITHOUT_TID)
 endif()
@@ -523,6 +611,22 @@ int main(void) { Dl_info info; (void)dladdr(\"\", &info); return 0; }"
 if (HAVE_DLADDR)
   # Define to use 'dladdr' function.
   add_definitions("-DHAVE_DLADDR")
+endif()
+
+# Check for emscripten; use asyncify feature if requested.
+check_c_source_compiles("
+#ifndef __EMSCRIPTEN__\n
+# error This is not Emscripten\n
+#endif\n
+int main(void) { return 0; }"
+  EMSCRIPTEN)
+if (EMSCRIPTEN AND enable_emscripten_asyncify)
+  # Use this option if your program is targeting -sASYNCIFY.  The latter is
+  # required to scan the stack, ASYNCIFY_STACK_SIZE is probably needed for
+  # gctest only.
+  add_definitions("-DEMSCRIPTEN_ASYNCIFY")
+  set(CMAKE_EXE_LINKER_FLAGS
+        "${CMAKE_EXE_LINKER_FLAGS} -sASYNCIFY -sASYNCIFY_STACK_SIZE=128000")
 endif()
 
 add_library(gc ${SRC})
@@ -576,17 +680,29 @@ endif(build_cord)
 
 if (BUILD_SHARED_LIBS AND HAVE_FLAG_WL_NO_UNDEFINED)
   # Declare that the libraries do not refer to external symbols.
-  # TODO: use add_link_options() when cmake_minimum_required > 3.13
-  target_link_libraries(gc PRIVATE -Wl,--no-undefined)
-  if (enable_cplusplus)
-    target_link_libraries(gccpp PRIVATE -Wl,--no-undefined)
-    if (enable_throw_bad_alloc_library)
-      target_link_libraries(gctba PRIVATE -Wl,--no-undefined)
-    endif(enable_throw_bad_alloc_library)
-  endif(enable_cplusplus)
-  if (build_cord)
-    target_link_libraries(cord PRIVATE -Wl,--no-undefined)
-  endif(build_cord)
+  if (${CMAKE_VERSION} VERSION_LESS "3.13.0")
+    target_link_libraries(gc PRIVATE ${WL_NO_UNDEFINED_OPT})
+    if (enable_cplusplus)
+      target_link_libraries(gccpp PRIVATE ${WL_NO_UNDEFINED_OPT})
+      if (enable_throw_bad_alloc_library)
+        target_link_libraries(gctba PRIVATE ${WL_NO_UNDEFINED_OPT})
+      endif(enable_throw_bad_alloc_library)
+    endif(enable_cplusplus)
+    if (build_cord)
+      target_link_libraries(cord PRIVATE ${WL_NO_UNDEFINED_OPT})
+    endif(build_cord)
+  else()
+    target_link_options(gc PRIVATE ${WL_NO_UNDEFINED_OPT})
+    if (enable_cplusplus)
+      target_link_options(gccpp PRIVATE ${WL_NO_UNDEFINED_OPT})
+      if (enable_throw_bad_alloc_library)
+        target_link_options(gctba PRIVATE ${WL_NO_UNDEFINED_OPT})
+      endif(enable_throw_bad_alloc_library)
+    endif(enable_cplusplus)
+    if (build_cord)
+      target_link_options(cord PRIVATE ${WL_NO_UNDEFINED_OPT})
+    endif(build_cord)
+  endif()
 endif()
 
 if (BUILD_SHARED_LIBS)
@@ -798,12 +914,45 @@ if (build_tests)
 endif(build_tests)
 
 if (enable_docs)
-  install(FILES AUTHORS LICENSE README.md
+  install(FILES AUTHORS ChangeLog LICENSE README.md
           DESTINATION "${CMAKE_INSTALL_DOCDIR}")
-  install(DIRECTORY doc/ DESTINATION "${CMAKE_INSTALL_DOCDIR}"
-          FILES_MATCHING
-            PATTERN "README.*"
-            PATTERN "*.md")
+  install(FILES
+            docs/README.autoconf
+            docs/README.cmake
+            docs/README.cords
+            docs/README.environment
+            docs/README.macros
+            docs/debugging.md
+            docs/faq.md
+            docs/finalization.md
+            docs/gcdescr.md
+            docs/gcinterface.md
+            docs/leak.md
+            docs/overview.md
+            docs/porting.md
+            docs/scale.md
+            docs/simple_example.md
+            docs/tree.md
+          DESTINATION "${CMAKE_INSTALL_DOCDIR}/docs")
+  install(FILES
+            docs/platforms/README.aix
+            docs/platforms/README.amiga
+            docs/platforms/README.arm_cross
+            docs/platforms/README.darwin
+            docs/platforms/README.dgux386
+            docs/platforms/README.emscripten
+            docs/platforms/README.ews4800
+            docs/platforms/README.hp
+            docs/platforms/README.linux
+            docs/platforms/README.mac
+            docs/platforms/README.os2
+            docs/platforms/README.sgi
+            docs/platforms/README.solaris2
+            docs/platforms/README.symbian
+            docs/platforms/README.uts
+            docs/platforms/README.win32
+            docs/platforms/README.win64
+          DESTINATION "${CMAKE_INSTALL_DOCDIR}/docs/platforms")
 
   install(FILES gc.man DESTINATION "${CMAKE_INSTALL_MANDIR}/man3" RENAME gc.3)
 endif(enable_docs)

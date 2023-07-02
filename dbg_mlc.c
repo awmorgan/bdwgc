@@ -57,7 +57,9 @@
 
 #ifdef KEEP_BACK_PTRS
 
-#ifdef LINT2
+  /* Use a custom trivial random() implementation as the standard   */
+  /* one might lead to crashes (if used from a multi-threaded code) */
+  /* or to a compiler warning about the deterministic result.       */
   static int GC_rand(void)
   {
     static GC_RAND_STATE_T seed;
@@ -66,18 +68,6 @@
   }
 
 # define RANDOM() (long)GC_rand()
-#else
-# include <stdlib.h>
-# undef GC_RAND_MAX
-# define GC_RAND_MAX RAND_MAX
-
-# if defined(__GLIBC__) || defined(SOLARIS) \
-     || defined(HPUX) || defined(IRIX5) || defined(OSF1)
-#   define RANDOM() random()
-# else
-#   define RANDOM() (long)rand()
-# endif
-#endif /* !LINT2 */
 
   /* Store back pointer to source in dest, if that appears to be possible. */
   /* This is not completely safe, since we may mistakenly conclude that    */
@@ -134,10 +124,10 @@
         ptr_t target = *(ptr_t *)bp;
         ptr_t alternate_target = *(ptr_t *)alternate_ptr;
 
-        if ((word)alternate_target >= (word)GC_least_plausible_heap_addr
-            && (word)alternate_target <= (word)GC_greatest_plausible_heap_addr
-            && ((word)target < (word)GC_least_plausible_heap_addr
-                || (word)target > (word)GC_greatest_plausible_heap_addr)) {
+        if ((word)alternate_target > GC_least_real_heap_addr
+            && (word)alternate_target < GC_greatest_real_heap_addr
+            && ((word)target <= GC_least_real_heap_addr
+                || (word)target >= GC_greatest_real_heap_addr)) {
             bp = alternate_ptr;
         }
       }
@@ -150,7 +140,7 @@
     } else {
       if (GC_HAS_DEBUG_INFO(bp_base)) bp_base += sizeof(oh);
       *base_p = bp_base;
-      *offset_p = bp - bp_base;
+      *offset_p = (size_t)(bp - bp_base);
       return GC_REFD_FROM_HEAP;
     }
   }
@@ -250,7 +240,6 @@
   GC_API void GC_CALL GC_generate_random_backtrace(void)
   {
     void *current;
-    DCL_LOCK_STATE;
 
     GC_ASSERT(I_DONT_HOLD_LOCK());
     if (GC_try_to_collect(GC_never_stop_func) == 0) {
@@ -272,7 +261,7 @@
 # define CROSSES_HBLK(p, sz) \
         (((word)((p) + sizeof(oh) + (sz) - 1) ^ (word)(p)) >= HBLKSIZE)
 
-GC_INNER void *GC_store_debug_info_inner(void *p, word sz GC_ATTR_UNUSED,
+GC_INNER void *GC_store_debug_info_inner(void *p, word sz,
                                          const char *string, int linenum)
 {
     word * result = (word *)((oh *)p + 1);
@@ -288,7 +277,9 @@ GC_INNER void *GC_store_debug_info_inner(void *p, word sz GC_ATTR_UNUSED,
 #   endif
     ((oh *)p) -> oh_string = string;
     ((oh *)p) -> oh_int = linenum;
-#   ifndef SHORT_DBG_HDRS
+#   ifdef SHORT_DBG_HDRS
+      UNUSED_ARG(sz);
+#   else
       ((oh *)p) -> oh_sz = sz;
       ((oh *)p) -> oh_sf = START_FLAG ^ (word)result;
       ((word *)p)[BYTES_TO_WORDS(GC_size(p))-1] =
@@ -303,7 +294,6 @@ static void *store_debug_info(void *p, size_t lb,
                               const char *fn, GC_EXTRA_PARAMS)
 {
     void *result;
-    DCL_LOCK_STATE;
 
     if (NULL == p) {
         GC_err_printf("%s(%lu) returning NULL (%s:%d)\n",
@@ -349,6 +339,7 @@ STATIC GC_describe_type_fn GC_describe_type_fns[MAXOBJKINDS] = {0};
 GC_API void GC_CALL GC_register_describe_type_fn(int kind,
                                                  GC_describe_type_fn fn)
 {
+  GC_ASSERT((unsigned)kind < MAXOBJKINDS);
   GC_describe_type_fns[kind] = fn;
 }
 
@@ -502,8 +493,6 @@ GC_API size_t GC_CALL GC_get_debug_header_size(void) {
 
 GC_API void GC_CALL GC_debug_register_displacement(size_t offset)
 {
-  DCL_LOCK_STATE;
-
   LOCK();
   GC_register_displacement_inner(offset);
   GC_register_displacement_inner((word)sizeof(oh) + offset);
@@ -574,9 +563,11 @@ GC_API GC_ATTR_MALLOC void * GC_CALL
                             OPT_RA s, i);
 }
 
-STATIC void * GC_debug_generic_malloc(size_t lb, int knd, GC_EXTRA_PARAMS)
+STATIC void * GC_debug_generic_malloc(size_t lb, int k, GC_EXTRA_PARAMS)
 {
-    void * result = GC_generic_malloc(SIZET_SAT_ADD(lb, DEBUG_BYTES), knd);
+    void * result = GC_generic_malloc_aligned(SIZET_SAT_ADD(lb, DEBUG_BYTES),
+                                              k, 0 /* flags */,
+                                              0 /* align_m1 */);
 
     return store_debug_info(result, lb, "GC_debug_generic_malloc",
                             OPT_RA s, i);
@@ -586,32 +577,13 @@ STATIC void * GC_debug_generic_malloc(size_t lb, int knd, GC_EXTRA_PARAMS)
   /* An allocation function for internal use.  Normally internally      */
   /* allocated objects do not have debug information.  But in this      */
   /* case, we need to make sure that all objects have debug headers.    */
-  GC_INNER void * GC_debug_generic_malloc_inner(size_t lb, int k)
+  GC_INNER void * GC_debug_generic_malloc_inner(size_t lb, int k,
+                                                unsigned flags)
   {
     void * result;
 
     GC_ASSERT(I_HOLD_LOCK());
-    result = GC_generic_malloc_inner(SIZET_SAT_ADD(lb, DEBUG_BYTES), k);
-    if (NULL == result) {
-        GC_err_printf("GC internal allocation (%lu bytes) returning NULL\n",
-                       (unsigned long) lb);
-        return NULL;
-    }
-    if (!GC_debugging_started) {
-        GC_start_debugging_inner();
-    }
-    ADD_CALL_CHAIN(result, GC_RETURN_ADDR);
-    return GC_store_debug_info_inner(result, (word)lb, "INTERNAL", 0);
-  }
-
-  GC_INNER void * GC_debug_generic_malloc_inner_ignore_off_page(size_t lb,
-                                                                int k)
-  {
-    void * result;
-
-    GC_ASSERT(I_HOLD_LOCK());
-    result = GC_generic_malloc_inner_ignore_off_page(
-                                SIZET_SAT_ADD(lb, DEBUG_BYTES), k);
+    result = GC_generic_malloc_inner(SIZET_SAT_ADD(lb, DEBUG_BYTES), k, flags);
     if (NULL == result) {
         GC_err_printf("GC internal allocation (%lu bytes) returning NULL\n",
                        (unsigned long) lb);
@@ -631,8 +603,10 @@ STATIC void * GC_debug_generic_malloc(size_t lb, int knd, GC_EXTRA_PARAMS)
     return GC_debug_malloc(lb, OPT_RA s, i);
   }
 
-  GC_API void GC_CALL GC_debug_change_stubborn(
-                                const void * p GC_ATTR_UNUSED) {}
+  GC_API void GC_CALL GC_debug_change_stubborn(const void *p)
+  {
+    UNUSED_ARG(p);
+  }
 #endif /* !CPPCHECK */
 
 GC_API void GC_CALL GC_debug_end_stubborn_change(const void *p)
@@ -647,7 +621,8 @@ GC_API void GC_CALL GC_debug_end_stubborn_change(const void *p)
 
 GC_API void GC_CALL GC_debug_ptr_store_and_dirty(void *p, const void *q)
 {
-    *(void **)GC_is_visible(p) = GC_is_valid_displacement((void *)q);
+    *(void **)GC_is_visible(p) = GC_is_valid_displacement(
+                                        (/* no const */ void *)(word)q);
     GC_debug_end_stubborn_change(p);
     REACHABLE_AFTER_DIRTY(q);
 }
@@ -775,11 +750,14 @@ GC_API void GC_CALL GC_debug_free(void * p)
 #     endif
       ABORT_ARG1("Invalid pointer passed to free()", ": %p", p);
     }
-    if ((ptr_t)p - (ptr_t)base != sizeof(oh)) {
+    if ((word)p - (word)base != sizeof(oh)) {
 #     if defined(REDIRECT_FREE) && defined(USE_PROC_FOR_LIBRARIES)
         /* TODO: Suppress the warning if free() caller is in libpthread */
         /* or libdl.                                                    */
 #     endif
+      /* TODO: Suppress the warning for objects allocated by            */
+      /* GC_memalign and friends (these ones do not have the debugging  */
+      /* counterpart).                                                  */
       GC_err_printf(
                "GC_debug_free called on pointer %p w/o debugging info\n", p);
     } else {
@@ -804,7 +782,7 @@ GC_API void GC_CALL GC_debug_free(void * p)
     }
     if (GC_find_leak
 #       ifndef SHORT_DBG_HDRS
-          && ((ptr_t)p - (ptr_t)base != sizeof(oh) || !GC_findleak_delay_free)
+          && ((word)p - (word)base != sizeof(oh) || !GC_findleak_delay_free)
 #       endif
         ) {
       GC_free(base);
@@ -842,7 +820,7 @@ GC_API void GC_CALL GC_debug_free(void * p)
   GC_INNER void GC_debug_free_inner(void * p)
   {
     ptr_t base = (ptr_t)GC_base(p);
-    GC_ASSERT((ptr_t)p - (ptr_t)base == sizeof(oh));
+    GC_ASSERT((word)p - (word)base == sizeof(oh));
 #   ifdef LINT2
       if (!base) ABORT("Invalid GC_debug_free_inner argument");
 #   endif
@@ -877,7 +855,7 @@ GC_API void * GC_CALL GC_debug_realloc(void * p, size_t lb, GC_EXTRA_PARAMS)
     if (base == 0) {
         ABORT_ARG1("Invalid pointer passed to realloc()", ": %p", p);
     }
-    if ((ptr_t)p - (ptr_t)base != sizeof(oh)) {
+    if ((word)p - (word)base != sizeof(oh)) {
         GC_err_printf(
               "GC_debug_realloc called on pointer %p w/o debugging info\n", p);
         return GC_realloc(p, lb);
@@ -918,9 +896,9 @@ GC_API void * GC_CALL GC_debug_realloc(void * p, size_t lb, GC_EXTRA_PARAMS)
 }
 
 GC_API GC_ATTR_MALLOC void * GC_CALL
-    GC_debug_generic_or_special_malloc(size_t lb, int knd, GC_EXTRA_PARAMS)
+    GC_debug_generic_or_special_malloc(size_t lb, int k, GC_EXTRA_PARAMS)
 {
-    switch (knd) {
+    switch (k) {
         case PTRFREE:
             return GC_debug_malloc_atomic(lb, OPT_RA s, i);
         case NORMAL:
@@ -932,7 +910,7 @@ GC_API GC_ATTR_MALLOC void * GC_CALL
             return GC_debug_malloc_atomic_uncollectable(lb, OPT_RA s, i);
 #     endif
         default:
-            return GC_debug_generic_malloc(lb, knd, OPT_RA s, i);
+            return GC_debug_generic_malloc(lb, k, OPT_RA s, i);
     }
 }
 
@@ -983,14 +961,14 @@ STATIC void GC_print_all_smashed_proc(void)
 
 /* Check all marked objects in the given block for validity     */
 /* Avoid GC_apply_to_each_object for performance reasons.       */
-STATIC void GC_CALLBACK GC_check_heap_block(struct hblk *hbp,
-                                            GC_word dummy GC_ATTR_UNUSED)
+STATIC void GC_CALLBACK GC_check_heap_block(struct hblk *hbp, GC_word dummy)
 {
     struct hblkhdr * hhdr = HDR(hbp);
     word sz = hhdr -> hb_sz;
     word bit_no;
     char *p, *plim;
 
+    UNUSED_ARG(dummy);
     p = hbp->hb_body;
     if (sz > MAXOBJBYTES) {
       plim = p;
@@ -1056,13 +1034,12 @@ struct closure {
 STATIC void * GC_make_closure(GC_finalization_proc fn, void * data)
 {
     struct closure * result =
-#   ifdef DBG_HDRS_ALL
-      (struct closure *) GC_debug_malloc(sizeof (struct closure),
-                                         GC_EXTRAS);
-#   else
-      (struct closure *) GC_malloc(sizeof (struct closure));
-#   endif
-    if (result != 0) {
+#     ifdef DBG_HDRS_ALL
+        (struct closure *)GC_debug_malloc(sizeof(struct closure), GC_EXTRAS);
+#     else
+        (struct closure *)GC_malloc(sizeof(struct closure));
+#     endif
+    if (result != NULL) {
       result -> cl_fn = fn;
       result -> cl_data = data;
     }
@@ -1087,7 +1064,7 @@ static void store_old(void *obj, GC_finalization_proc my_old_fn,
 {
     if (0 != my_old_fn) {
       if (my_old_fn == OFN_UNSET) {
-        /* register_finalizer() failed; (*ofn) and (*ocd) are unchanged. */
+        /* GC_register_finalizer() failed; (*ofn) and (*ocd) are unchanged. */
         return;
       }
       if (my_old_fn != GC_debug_invoke_finalizer) {

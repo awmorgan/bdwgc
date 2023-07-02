@@ -21,21 +21,23 @@
 /* has no callee-save registers, then the generic code is    */
 /* safe, but this will not be noticed by this piece of       */
 /* code.)  This test appears to be far from perfect.         */
+
 #include <stdio.h>
 #include <setjmp.h>
 #include <string.h>
+
 #include "private/gc_priv.h"
 
 #ifdef OS2
-/* GETPAGESIZE() is set to getpagesize() by default, but that   */
-/* doesn't really exist, and the collector doesn't need it.     */
-#define INCL_DOSFILEMGR
-#define INCL_DOSMISC
-#define INCL_DOSERRORS
-#include <os2.h>
+# define INCL_DOSERRORS
+# define INCL_DOSFILEMGR
+# define INCL_DOSMISC
+# include <os2.h>
 
-int getpagesize(void)
-{
+  /* Similar to that in os_dep.c but use fprintf() to report a failure. */
+  /* GETPAGESIZE() macro is defined to os2_getpagesize().               */
+  static int os2_getpagesize(void)
+  {
     ULONG result[1];
 
     if (DosQuerySysInfo(QSV_PAGE_SIZE, QSV_PAGE_SIZE,
@@ -44,15 +46,16 @@ int getpagesize(void)
         result[0] = 4096;
     }
     return (int)result[0];
-}
+  }
 
-#elif defined(MSWIN32) || defined(MSWINCE) || defined(CYGWIN32)
-  int getpagesize(void)
+#elif defined(ANY_MSWIN)
+  static int win32_getpagesize(void)
   {
     SYSTEM_INFO sysinfo;
     GetSystemInfo(&sysinfo);
     return sysinfo.dwPageSize;
   }
+# define GETPAGESIZE() win32_getpagesize()
 #endif
 
 struct a_s {
@@ -60,7 +63,7 @@ struct a_s {
   char * a_b;
 } a;
 
-word nested_sp(void)
+static word nested_sp(void)
 {
 # if GC_GNUC_PREREQ(4, 0)
     return (word)__builtin_frame_address(0);
@@ -87,7 +90,10 @@ int main(void)
     volatile word sp;
     unsigned ps = GETPAGESIZE();
     JMP_BUF b;
-    register int x = (int)strlen(a_str); /* 1, slightly disguised */
+#   if !defined(__cplusplus) || __cplusplus < 201703L /* before c++17 */
+      register
+#   endif
+      int x = (int)strlen(a_str); /* 1, slightly disguised */
     static volatile int y = 0;
 
     sp = (word)(&sp);
@@ -98,12 +104,12 @@ int main(void)
     if (nested_sp_fn() < sp) {
       printf("Stack appears to grow down, which is the default.\n");
       printf("A good guess for STACKBOTTOM on this machine is 0x%lx.\n",
-             ((unsigned long)sp + ps) & ~(ps-1));
+             ((unsigned long)sp + ps) & ~(unsigned long)(ps-1));
     } else {
       printf("Stack appears to grow up.\n");
-      printf("Define STACK_GROWS_UP in gc_private.h\n");
+      printf("Define STACK_GROWS_UP in gc_priv.h\n");
       printf("A good guess for STACKBOTTOM on this machine is 0x%lx.\n",
-             ((unsigned long)sp + ps) & ~(ps-1));
+             (unsigned long)sp & ~(unsigned long)(ps-1)); /* round down */
     }
     printf("Note that this may vary between machines of ostensibly\n");
     printf("the same architecture (e.g. Sun 3/50s and 3/80s).\n");

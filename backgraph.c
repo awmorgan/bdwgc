@@ -166,7 +166,7 @@ static void push_in_progress(ptr_t p)
   in_progress_space[n_in_progress++] = p;
 }
 
-static GC_bool is_in_progress(ptr_t p)
+static GC_bool is_in_progress(const char *p)
 {
   size_t i;
   for (i = 0; i < n_in_progress; ++i) {
@@ -175,8 +175,11 @@ static GC_bool is_in_progress(ptr_t p)
   return FALSE;
 }
 
-GC_INLINE void pop_in_progress(ptr_t p GC_ATTR_UNUSED)
+GC_INLINE void pop_in_progress(ptr_t p)
 {
+# ifndef GC_ASSERTIONS
+    UNUSED_ARG(p);
+# endif
   --n_in_progress;
   GC_ASSERT(in_progress_space[n_in_progress] == p);
 }
@@ -236,7 +239,7 @@ static void add_edge(ptr_t p, ptr_t q)
 
     /* Check whether it was already in the list of predecessors. */
     {
-      back_edges *e = (back_edges *)((word)pred & ~FLAG_MANY);
+      back_edges *e = (back_edges *)((word)pred & ~(word)FLAG_MANY);
       word n_edges;
       word total;
       int local = 0;
@@ -263,7 +266,7 @@ static void add_edge(ptr_t p, ptr_t q)
     }
 
     ensure_struct(q);
-    be = (back_edges *)((word)GET_OH_BG_PTR(q) & ~FLAG_MANY);
+    be = (back_edges *)((word)GET_OH_BG_PTR(q) & ~(word)FLAG_MANY);
     for (i = be -> n_edges, be_cont = be; i > MAX_IN; i -= MAX_IN)
         be_cont = be_cont -> cont;
     if (i == MAX_IN) {
@@ -302,14 +305,15 @@ GC_INLINE void GC_apply_to_each_object(per_object_func f)
   GC_apply_to_all_blocks(per_object_helper, (word)f);
 }
 
-static void reset_back_edge(ptr_t p, size_t n_bytes GC_ATTR_UNUSED,
-                            word gc_descr GC_ATTR_UNUSED)
+static void reset_back_edge(ptr_t p, size_t n_bytes, word gc_descr)
 {
+  UNUSED_ARG(n_bytes);
+  UNUSED_ARG(gc_descr);
   /* Skip any free list links, or dropped blocks */
   if (GC_HAS_DEBUG_INFO(p)) {
     ptr_t old_back_ptr = GET_OH_BG_PTR(p);
     if ((word)old_back_ptr & FLAG_MANY) {
-      back_edges *be = (back_edges *)((word)old_back_ptr & ~FLAG_MANY);
+      back_edges *be = (back_edges *)((word)old_back_ptr & ~(word)FLAG_MANY);
       if (!(be -> flags & RETAIN)) {
         deallocate_back_edges(be);
         SET_OH_BG_PTR(p, 0);
@@ -329,7 +333,7 @@ static void reset_back_edge(ptr_t p, size_t n_bytes GC_ATTR_UNUSED,
         GC_ASSERT(GC_is_marked(p));
 
         /* We only retain things for one GC cycle at a time.            */
-          be -> flags &= ~RETAIN;
+          be -> flags &= (unsigned short)~RETAIN;
       }
     } else /* Simple back pointer */ {
       /* Clear to avoid dangling pointer. */
@@ -352,12 +356,12 @@ static void add_back_edges(ptr_t p, size_t n_bytes, word gc_descr)
 
     LOAD_WORD_OR_CONTINUE(current, current_p);
     FIXUP_POINTER(current);
-    if (current >= (word)GC_least_plausible_heap_addr &&
-        current <= (word)GC_greatest_plausible_heap_addr) {
-       ptr_t target = (ptr_t)GC_base((void *)current);
-       if (0 != target) {
-         add_edge(p, target);
-       }
+    if (current > GC_least_real_heap_addr
+        && current < GC_greatest_real_heap_addr) {
+      ptr_t target = (ptr_t)GC_base((void *)current);
+
+      if (target != NULL)
+        add_edge(p, target);
     }
   }
 }
@@ -391,12 +395,12 @@ static word backwards_height(ptr_t p)
     pop_in_progress(p);
     return result;
   }
-  be = (back_edges *)((word)pred & ~FLAG_MANY);
+  be = (back_edges *)((word)pred & ~(word)FLAG_MANY);
   if (be -> height >= 0 && be -> height_gc_no == (unsigned short)GC_gc_no)
-      return be -> height;
+      return (word)(be -> height);
   /* Ignore back edges in DFS */
     if (be -> height == HEIGHT_IN_PROGRESS) return 0;
-  result = (be -> height > 0? be -> height : 1);
+  result = be -> height > 0 ? (word)(be -> height) : 1U;
   be -> height = HEIGHT_IN_PROGRESS;
 
   {
@@ -439,7 +443,7 @@ static word backwards_height(ptr_t p)
       }
   }
 
-  be -> height = result;
+  be -> height = (signed_word)result;
   be -> height_gc_no = (unsigned short)GC_gc_no;
   return result;
 }
@@ -453,9 +457,10 @@ STATIC ptr_t GC_deepest_obj = NULL;
 /* next GC.                                                             */
 /* Set GC_max_height to be the maximum height we encounter, and         */
 /* GC_deepest_obj to be the corresponding object.                       */
-static void update_max_height(ptr_t p, size_t n_bytes GC_ATTR_UNUSED,
-                              word gc_descr GC_ATTR_UNUSED)
+static void update_max_height(ptr_t p, size_t n_bytes, word gc_descr)
 {
+  UNUSED_ARG(n_bytes);
+  UNUSED_ARG(gc_descr);
   if (GC_is_marked(p) && GC_HAS_DEBUG_INFO(p)) {
     word p_height = 0;
     ptr_t p_deepest_obj = 0;
@@ -467,13 +472,14 @@ static void update_max_height(ptr_t p, size_t n_bytes GC_ATTR_UNUSED,
     /* to p, but it can't have decreased.                               */
     back_ptr = GET_OH_BG_PTR(p);
     if (0 != back_ptr && ((word)back_ptr & FLAG_MANY)) {
-      be = (back_edges *)((word)back_ptr & ~FLAG_MANY);
-      if (be -> height != HEIGHT_UNKNOWN) p_height = be -> height;
+      be = (back_edges *)((word)back_ptr & ~(word)FLAG_MANY);
+      if (be -> height != HEIGHT_UNKNOWN)
+        p_height = (word)(be -> height);
     }
 
     {
       ptr_t pred = GET_OH_BG_PTR(p);
-      back_edges *e = (back_edges *)((word)pred & ~FLAG_MANY);
+      back_edges *e = (back_edges *)((word)pred & ~(word)FLAG_MANY);
       word n_edges;
       word total;
       int local = 0;
@@ -512,10 +518,10 @@ static void update_max_height(ptr_t p, size_t n_bytes GC_ATTR_UNUSED,
         if (be == 0) {
           ensure_struct(p);
           back_ptr = GET_OH_BG_PTR(p);
-          be = (back_edges *)((word)back_ptr & ~FLAG_MANY);
+          be = (back_edges *)((word)back_ptr & ~(word)FLAG_MANY);
         }
         be -> flags |= RETAIN;
-        be -> height = p_height;
+        be -> height = (signed_word)p_height;
         be -> height_gc_no = (unsigned short)GC_gc_no;
     }
     if (p_height > GC_max_height) {

@@ -1,5 +1,5 @@
-[Interface Overview](gcinterface.md) | [Tutorial Slides](http://www.hboehm.info/gc/04tutorial.pdf) | [FAQ](http://www.hboehm.info/gc/faq.html) | [Example](simple_example.md) | [Download](https://github.com/ivmai/bdwgc/wiki/Download) | [License](http://www.hboehm.info/gc/license.txt)
----|---|---|---|---|---
+[Interface Overview](gcinterface.md) | [Tutorial Slides](http://www.hboehm.info/gc/04tutorial.pdf) | [FAQ](faq.md) | [Example](simple_example.md) | [Download](https://github.com/ivmai/bdwgc/wiki/Download)
+---|---|---|---|---
 
 # A garbage collector for C and C++
 
@@ -7,6 +7,7 @@
   * Some collector details
   * Further reading
   * Information provided on the BDWGC site
+  * Documentation files
   * More background information
   * Contacts and new release announcements
 
@@ -43,9 +44,7 @@ The development version (snapshot) is available in the master branch of
 [bdwgc git](https://github.com/ivmai/bdwgc) repository on GitHub.
 
 The arguments for and against conservative garbage collection in C and C++ are
-briefly discussed [here](http://www.hboehm.info/gc/issues.html). The
-beginnings of a frequently-asked-questions list are
-[here](http://www.hboehm.info/gc/faq.html).
+briefly discussed [here](http://www.hboehm.info/gc/issues.html).
 
 The garbage collector code is copyrighted by
 [Hans-J. Boehm](http://www.hboehm.info), Alan J. Demers,
@@ -54,8 +53,7 @@ The garbage collector code is copyrighted by
 [Hewlett-Packard Company](http://www.hp.com/),
 [Ivan Maidanski](https://github.com/ivmai), and partially by some others.
 It may be used and copied without payment of a fee under minimal restrictions.
-See the LICENSE file in the distribution or the
-[license](http://www.hboehm.info/gc/license.txt) for more details.
+See the LICENSE file in the distribution for more details.
 **IT IS PROVIDED AS IS, WITH ABSOLUTELY NO WARRANTY EXPRESSED OR IMPLIED.
 ANY USE IS AT YOUR OWN RISK.**
 
@@ -75,6 +73,9 @@ platforms are more polished (better supported) than others.
 Irix pthreads, Linux threads, Windows threads, Solaris threads (pthreads
 only), HP/UX 11 pthreads, Tru64 pthreads, and MacOS X threads are supported.
 
+See also [here](porting.md) for the instructions on how to port the library to
+new platforms.
+
 ## Some Collector Details
 
 The collector uses a [mark-sweep](http://www.hboehm.info/gc/complexity.html)
@@ -91,8 +92,9 @@ For an overview of the implementation, see [here](gcdescr.md).
 
 The garbage collector distribution includes a C string (`cord.h`) package that
 provides for fast concatenation and substring operations on long strings.
-A simple curses- and win32-based editor that represents the entire file as
-a cord is included as a sample application.
+A simple curses- and Windows-based editor that represents the entire file as
+a cord is included as a sample application.  See [README.cords](README.cords)
+file for the details.
 
 Performance of the non-incremental collector is typically competitive with
 `malloc`/`free` implementations. Both space and time overhead are likely to be
@@ -110,9 +112,6 @@ compensated for by e.g. decreased copying if programs are written and tuned
 for garbage collection.
 
 ## Further reading
-
-**The beginnings of a frequently asked questions list for this collector are
-[here](http://www.hboehm.info/gc/faq.html).**
 
 **The following provide information on garbage collection in general:**
 
@@ -159,7 +158,7 @@ and Implementation, _SIGPLAN Notices 28_, 6 (June 1993), pp. 197-206.
 
 Boehm, H., Reducing Garbage Collector Cache Misses,
 _Proceedings of the 2000 International Symposium on Memory Management_.
-[Official version](http://portal.acm.org/citation.cfm?doid=362422.362438).
+[Official version](https://dl.acm.org/doi/10.1145/362422.362438).
 [Technical report](http://www.hpl.hp.com/techreports/2000/HPL-2000-99.html)
 version. Describes the prefetch strategy incorporated into the collector for
 some platforms. Explains why the sweep phase of a _mark-sweep_ collector
@@ -168,7 +167,7 @@ should not really be a distinct phase.
 M. Serrano, H. Boehm, Understanding Memory Allocation of Scheme Programs,
 _Proceedings of the Fifth ACM SIGPLAN International Conference on Functional
 Programming_, 2000, Montreal, Canada, pp. 245-256.
-[Official version](http://dl.acm.org/citation.cfm?id=351264). Earlier
+[Official version](https://dl.acm.org/doi/10.1145/357766.351264). Earlier
 [Technical Report](http://www.hpl.hp.com/techreports/2000/HPL-2000-62.html)
 version. Includes some discussion of the collector debugging facilities for
 identifying causes of memory retention.
@@ -181,7 +180,7 @@ results.
 Boehm, H., Bounding Space Usage of Conservative Garbage Collectors,
 _Proceedings of the 2002 ACM SIGPLAN-SIGACT Symposium on Principles
 of Programming Languages_, Jan. 2002, pp. 93-100.
-[Official version](http://portal.acm.org/citation.cfm?doid=503272.503282).
+[Official version](https://dl.acm.org/doi/10.1145/565816.503282).
 [Technical report](http://www.hpl.hp.com/techreports/2001/HPL-2001-251.html)
 version. Includes a discussion of a collector facility to much more reliably
 test for the potential of unbounded heap growth.
@@ -212,7 +211,7 @@ Joel Bartlett's
 [mostly copying conservative garbage collector for C++](ftp://gatekeeper.dec.com/pub/compaq/WRL/research-reports/WRL-TN-12.ps).
 
 John Ellis and David Detlef's
-[Safe Efficient Garbage Collection for C++](http://dl.acm.org/citation.cfm?id=1267983)
+[Safe Efficient Garbage Collection for C++](https://dl.acm.org/doi/10.5555/1267974.1267983)
 proposal.
 
 Henry Baker's [paper collection](http://home.pipeline.com/%7Ehbaker1/).
@@ -224,13 +223,21 @@ Slides for Hans Boehm's
 
 [Current users](https://github.com/ivmai/bdwgc/wiki/Known-clients) list.
 
+[Slides from an ISMM 2004 tutorial about the GC](http://www.hboehm.info/gc/04tutorial.pdf).
+
+[A FAQ (frequently asked questions) list](faq.md).
+
+[Directory](http://www.hboehm.info/gc/gc_source/) containing the distribution
+files of all garbage collector releases.  It duplicates
+[Download](https://github.com/ivmai/bdwgc/wiki/Download) page on GitHub.
+
+## Documentation files
+
+The following documents are not platform-specific in general.
+
 [A simple illustration of how to build and use the collector](simple_example.md).
 
 [Description of alternate interfaces to the garbage collector](gcinterface.md).
-
-[Slides from an ISMM 2004 tutorial about the GC](http://www.hboehm.info/gc/04tutorial.pdf).
-
-[A FAQ (frequently asked questions) list](http://www.hboehm.info/gc/faq.html).
 
 [How to use the garbage collector as a leak detector](leak.md).
 
@@ -242,9 +249,19 @@ Slides for Hans Boehm's
 
 [Scalability of the collector to multiprocessors](scale.md).
 
-[Directory](http://www.hboehm.info/gc/gc_source/) containing the distribution
-files of all garbage collector releases. It duplicates
-[Download](https://github.com/ivmai/bdwgc/wiki/Download) page on GitHub.
+[Instructions on building the library using autoconf/configure](README.autoconf).
+
+[Instructions on building the library using cmake](README.cmake).
+
+[List of environment variables that affect the collector operation at runtime](README.environment).
+
+[List of compile time macros that affect the library when built](README.macros).
+
+[Details on the finalization facility](finalization.md).
+
+[Instructions on how to port the library to new platforms](porting.md).
+
+[Description of the cord library built on top of GC](README.cords).
 
 ## More background information
 
@@ -262,7 +279,7 @@ files of all garbage collector releases. It duplicates
 
 [Slide set discussing _Destructors, Finalizers, and Synchronization_, POPL 2003](http://www.hboehm.info/popl03/web/).
 
-[Paper corresponding to above slide set](http://portal.acm.org/citation.cfm?doid=604131.604153)
+[Paper corresponding to above slide set](https://dl.acm.org/doi/10.1145/604131.604153)
 ([Technical Report](http://www.hpl.hp.com/techreports/2002/HPL-2002-335.html)
 version).
 

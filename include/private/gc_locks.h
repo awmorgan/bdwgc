@@ -21,7 +21,6 @@
 /*
  * Mutual exclusion between allocator/collector routines.
  * Needed if there is more than one allocator thread.
- * DCL_LOCK_STATE declares any local variables needed by LOCK and UNLOCK.
  *
  * Note that I_HOLD_LOCK and I_DONT_HOLD_LOCK are used only positively
  * in assertions, and may return TRUE in the "don't know" case.
@@ -37,12 +36,6 @@
 
 # ifdef PCR
     GC_EXTERN PCR_Th_ML GC_allocate_ml;
-#   if defined(CPPCHECK)
-#     define DCL_LOCK_STATE /* empty */
-#   else
-#     define DCL_LOCK_STATE \
-         PCR_ERes GC_fastLockRes; PCR_sigset_t GC_old_sig_mask
-#   endif
 #   define UNCOND_LOCK() PCR_Th_ML_Acquire(&GC_allocate_ml)
 #   define UNCOND_UNLOCK() PCR_Th_ML_Release(&GC_allocate_ml)
 # elif defined(NN_PLATFORM_CTR) || defined(NINTENDO_SWITCH)
@@ -58,25 +51,35 @@
        || defined(LINT2)) && defined(GC_PTHREADS)
 #   define USE_PTHREAD_LOCKS
 #   undef USE_SPIN_LOCK
-#   if defined(LINT2) && !defined(NO_PTHREAD_TRYLOCK)
+#   if (defined(LINT2) || defined(GC_WIN32_THREADS)) \
+       && !defined(NO_PTHREAD_TRYLOCK)
+      /* pthread_mutex_trylock may not win in GC_lock on Win32, */
+      /* due to builtin support for spinning first?             */
 #     define NO_PTHREAD_TRYLOCK
 #   endif
 # endif
 
+# if defined(GC_WIN32_THREADS) && !defined(USE_PTHREAD_LOCKS) \
+     || defined(GC_PTHREADS)
+#   define NO_THREAD ((unsigned long)(-1L))
+                /* != NUMERIC_THREAD_ID(pthread_self()) for any thread */
+#   ifdef GC_ASSERTIONS
+      GC_EXTERN unsigned long GC_lock_holder;
+#     define UNSET_LOCK_HOLDER() (void)(GC_lock_holder = NO_THREAD)
+#   endif
+# endif /* GC_WIN32_THREADS || GC_PTHREADS */
+
 # if defined(GC_WIN32_THREADS) && !defined(USE_PTHREAD_LOCKS)
-#   define NO_THREAD (DWORD)(-1)
     GC_EXTERN CRITICAL_SECTION GC_allocate_ml;
 #   ifdef GC_ASSERTIONS
-      GC_EXTERN DWORD GC_lock_holder;
-#     define SET_LOCK_HOLDER() GC_lock_holder = GetCurrentThreadId()
-#     define UNSET_LOCK_HOLDER() GC_lock_holder = NO_THREAD
+#     define SET_LOCK_HOLDER() (void)(GC_lock_holder = GetCurrentThreadId())
 #     define I_HOLD_LOCK() (!GC_need_to_lock \
-                           || GC_lock_holder == GetCurrentThreadId())
+                            || GC_lock_holder == GetCurrentThreadId())
 #     ifdef THREAD_SANITIZER
 #       define I_DONT_HOLD_LOCK() TRUE /* Conservatively say yes */
 #     else
 #       define I_DONT_HOLD_LOCK() (!GC_need_to_lock \
-                           || GC_lock_holder != GetCurrentThreadId())
+                            || GC_lock_holder != GetCurrentThreadId())
 #     endif
 #     define UNCOND_LOCK() \
                 { GC_ASSERT(I_DONT_HOLD_LOCK()); \
@@ -124,8 +127,6 @@
       /* will result in poor performance (as NUMERIC_THREAD_ID is       */
       /* defined to just a constant) and weak assertion checking.       */
 #   endif
-#   define NO_THREAD ((unsigned long)(-1l))
-                /* != NUMERIC_THREAD_ID(pthread_self()) for any thread */
 
 #   ifdef SN_TARGET_PSP2
       EXTERN_C_END
@@ -198,10 +199,8 @@
 #     endif /* !GC_ASSERTIONS */
 #   endif /* USE_PTHREAD_LOCKS */
 #   ifdef GC_ASSERTIONS
-      GC_EXTERN unsigned long GC_lock_holder;
 #     define SET_LOCK_HOLDER() \
-                GC_lock_holder = NUMERIC_THREAD_ID(pthread_self())
-#     define UNSET_LOCK_HOLDER() GC_lock_holder = NO_THREAD
+                (void)(GC_lock_holder = NUMERIC_THREAD_ID(pthread_self()))
 #     define I_HOLD_LOCK() \
                 (!GC_need_to_lock \
                  || GC_lock_holder == NUMERIC_THREAD_ID(pthread_self()))
@@ -214,10 +213,10 @@
 #     endif
 #   endif /* GC_ASSERTIONS */
 #   ifndef GC_WIN32_THREADS
-      GC_EXTERN volatile GC_bool GC_collecting;
+      GC_EXTERN volatile unsigned char GC_collecting;
 #     ifdef AO_HAVE_char_store
-#       define ENTER_GC() AO_char_store((unsigned char*)&GC_collecting, TRUE)
-#       define EXIT_GC() AO_char_store((unsigned char*)&GC_collecting, FALSE)
+#       define ENTER_GC() AO_char_store(&GC_collecting, TRUE)
+#       define EXIT_GC() AO_char_store(&GC_collecting, FALSE)
 #     else
 #       define ENTER_GC() (void)(GC_collecting = TRUE)
 #       define EXIT_GC() (void)(GC_collecting = FALSE)
@@ -279,10 +278,6 @@
 # ifndef ENTER_GC
 #   define ENTER_GC()
 #   define EXIT_GC()
-# endif
-
-# ifndef DCL_LOCK_STATE
-#   define DCL_LOCK_STATE
 # endif
 
 #endif /* GC_LOCKS_H */

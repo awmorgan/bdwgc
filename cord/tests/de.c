@@ -40,7 +40,6 @@
 #if (defined(__BORLANDC__) || defined(__CYGWIN__) || defined(__MINGW32__) \
      || defined(__NT__) || defined(_WIN32)) && !defined(WIN32)
     /* If this is DOS or win16, we'll fail anyway.      */
-    /* Might as well assume win32.                      */
 #   define WIN32
 #endif
 
@@ -73,6 +72,7 @@
 # include <unistd.h> /* for sleep() */
 # define de_error(s) { fprintf(stderr, s); sleep(2); }
 #endif
+
 #include "de_cmds.h"
 
 #if defined(CPPCHECK)
@@ -120,16 +120,17 @@ int dis_col = 0;
 # define NONE - 2
 int need_redisplay = 0; /* Line that needs to be redisplayed.   */
 
-
 /* Current cursor position. Always within file. */
 int line = 0;
 int col = 0;
 size_t file_pos = 0;    /* Character position corresponding to cursor.  */
 
 /* Invalidate line map for lines > i */
-void invalidate_map(int i)
+static void invalidate_map(int i)
 {
-    while(current_map -> line > i) {
+    for (;;) {
+        if (NULL == current_map) exit(4); /* for CSA, should not happen */
+        if (current_map -> line <= i) break;
         current_map = current_map -> previous;
         current_map_size--;
     }
@@ -137,7 +138,7 @@ void invalidate_map(int i)
 
 /* Reduce the number of map entries to save space for huge files. */
 /* This also affects maps in histories.                           */
-void prune_map(void)
+static void prune_map(void)
 {
     line_map map = current_map;
     int start_line = map -> line;
@@ -155,7 +156,7 @@ void prune_map(void)
 }
 
 /* Add mapping entry */
-void add_map(int line_arg, size_t pos)
+static void add_map(int line_arg, size_t pos)
 {
     line_map new_map = GC_NEW(struct LineMapRep);
     line_map cur_map;
@@ -170,14 +171,12 @@ void add_map(int line_arg, size_t pos)
     current_map_size++;
 }
 
-
-
 /* Return position of column *c of ith line in   */
 /* current file. Adjust *c to be within the line.*/
 /* A 0 pointer is taken as 0 column.             */
 /* Returns CORD_NOT_FOUND if i is too big.       */
 /* Assumes i > dis_line.                         */
-size_t line_pos(int i, int *c)
+static size_t line_pos(int i, int *c)
 {
     int j;
     size_t cur;
@@ -203,7 +202,7 @@ size_t line_pos(int i, int *c)
     return cur;
 }
 
-void add_hist(CORD s)
+static void add_hist(CORD s)
 {
     history new_file = GC_NEW(struct HistoryRep);
 
@@ -219,7 +218,7 @@ void add_hist(CORD s)
     now = new_file;
 }
 
-void del_hist(void)
+static void del_hist(void)
 {
     now = now -> previous;
     current = now -> file_contents;
@@ -234,10 +233,9 @@ int screen_size = 0;
 # ifndef WIN32
 /* Replace a line in the curses stdscr. All control characters are      */
 /* displayed as upper case characters in standout mode.  This isn't     */
-/* terribly appropriate for tabs.                                                                       */
-void replace_line(int i, CORD s)
+/* terribly appropriate for tabs.                                       */
+static void replace_line(int i, CORD s)
 {
-    CORD_pos p;
 #   if !defined(MACINTOSH)
         size_t len = CORD_len(s);
 #   endif
@@ -254,6 +252,8 @@ void replace_line(int i, CORD s)
         }
 #   endif
     if (CORD_cmp(screen[i], s) != 0) {
+        CORD_pos p;
+
         move(i, 0); clrtoeol(); move(i,0);
 
         CORD_FOR (p, s) {
@@ -274,7 +274,7 @@ void replace_line(int i, CORD s)
 
 /* Return up to COLS characters of the line of s starting at pos,       */
 /* returning only characters after the given column.                    */
-CORD retrieve_line(CORD s, size_t pos, unsigned column)
+static CORD retrieve_line(CORD s, size_t pos, unsigned column)
 {
     CORD candidate = CORD_substr(s, pos, column + COLS);
                         /* avoids scanning very long lines      */
@@ -288,7 +288,7 @@ CORD retrieve_line(CORD s, size_t pos, unsigned column)
 }
 
 # ifdef WIN32
-#   define refresh();
+#   define refresh() /* Empty */
 
     CORD retrieve_screen_line(int i)
     {
@@ -302,7 +302,7 @@ CORD retrieve_line(CORD s, size_t pos, unsigned column)
 # endif
 
 /* Display the visible section of the current file       */
-void redisplay(void)
+static void redisplay(void)
 {
     int i;
 
@@ -326,7 +326,7 @@ int dis_granularity;
 
 /* Update dis_line, dis_col, and dis_pos to make cursor visible.        */
 /* Assumes line, col, dis_line, dis_pos are in bounds.                  */
-void normalize_display(void)
+static void normalize_display(void)
 {
     int old_line = dis_line;
     int old_col = dis_col;
@@ -351,7 +351,7 @@ void normalize_display(void)
 
 /* Adjust display so that cursor is visible; move cursor into position  */
 /* Update screen if necessary.                                          */
-void fix_cursor(void)
+static void fix_cursor(void)
 {
     normalize_display();
     if (need_redisplay != NONE) redisplay();
@@ -364,7 +364,7 @@ void fix_cursor(void)
 
 /* Make sure line, col, and dis_pos are somewhere inside file.  */
 /* Recompute file_pos.  Assumes dis_pos is accurate or past eof */
-void fix_pos(void)
+static void fix_pos(void)
 {
     int my_col = col;
 
@@ -390,6 +390,7 @@ void fix_pos(void)
 /*
  * beep() is part of some curses packages and not others.
  * We try to match the type of the builtin one, if any.
+ * Declared in curses.h.
  */
   int beep(void)
   {
